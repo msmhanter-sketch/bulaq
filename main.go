@@ -1,12 +1,15 @@
 package main
 
 import (
+	"butaq/codegen"
 	"butaq/lexer"
 	"butaq/parser"
 	"butaq/typechecker"
-	"butaq/vm"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 func main() {
@@ -36,8 +39,9 @@ func main() {
 	}
 
 	// 2. Static Type Checking (before execution)
+	tcEnv := typechecker.NewTypeEnv()
 	tc := typechecker.New()
-	tc.Check(program, typechecker.NewTypeEnv()) // uses root TypeEnv
+	tc.Check(program, tcEnv)
 
 	if len(tc.Errors) != 0 {
 		fmt.Println("Статикалық тип қателері (Static Type Errors):")
@@ -47,8 +51,41 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. VM Execution
-	v := vm.New()
-	env := vm.NewEnvironment()
-	v.Eval(program, env)
+	// 3. C++ Code Generation
+	cg := codegen.New(tcEnv)
+	cppCode := cg.Generate(program)
+
+	// 4. Compilation via g++
+	tmpDir, err := os.MkdirTemp("", "butaq_build_*")
+	if err != nil {
+		fmt.Println("Уақытша папка құру қатесі:", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cppFile := filepath.Join(tmpDir, "main.cpp")
+	err = os.WriteFile(cppFile, []byte(cppCode), 0644)
+	if err != nil {
+		fmt.Println("C++ файлын жазу қатесі:", err)
+		os.Exit(1)
+	}
+
+	baseName := strings.TrimSuffix(filepath.Base(inputFile), ".bu")
+	outputBinary := baseName
+
+	cmd := exec.Command("g++", "-O3", "-std=c++17", "-o", outputBinary, cppFile)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Println("C++ компиляция қатесі:")
+		fmt.Println(string(output))
+		// Print generated code for debug
+		fmt.Println("--- Generated C++ Code ---")
+		fmt.Println(cppCode)
+		os.Exit(1)
+	}
+
+	// Make executable
+	os.Chmod(outputBinary, 0755)
+
+	fmt.Printf("Сәтті! Дербес бағдарлама компиляцияланды (Compiled successfully to standalone native binary): %s\n", outputBinary)
 }
