@@ -1,0 +1,29 @@
+# Butaq - SOV syntax programming language
+# Subject-Object-Verb means verbs/actions go at the end
+
+# Variables: <name> <value> болсын
+x 10 болсын
+y 5 болсын
+
+# Math and variables: x and y, plus
+қосынды x y қосу болсын
+
+"10 мен 5 қосындысы:" жазу
+қосынды жазу
+
+# If/Else logic
+# x 5 үлкен егер { ... } әйтпесе { ... }
+x 5 үлкен егер {
+    "x 5-тен үлкен!" жазу
+} әйтпесе {
+    "x 5-тен кіші немесе тең" жазу
+}
+
+# While logic
+# z 0 болсын. z 5 кіші әзірше { z z 1 қосу болсын }
+z 0 болсын
+"Цикл басталады:" жазу
+z 5 кіші әзірше {
+    z жазу
+    z z 1 қосу болсын
+}
