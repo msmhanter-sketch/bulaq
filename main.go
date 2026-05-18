@@ -51,11 +51,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. C++ Code Generation
-	cg := codegen.New(tcEnv)
-	cppCode := cg.Generate(program)
+	// 3. Assembly Code Generation
+	cg := codegen.NewAsm()
+	asmCode := cg.Generate(program)
 
-	// 4. Compilation via g++
+	// 4. Compilation via nasm and ld
 	tmpDir, err := os.MkdirTemp("", "butaq_build_*")
 	if err != nil {
 		fmt.Println("Уақытша папка құру қатесі:", err)
@@ -63,29 +63,39 @@ func main() {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cppFile := filepath.Join(tmpDir, "main.cpp")
-	err = os.WriteFile(cppFile, []byte(cppCode), 0644)
+	asmFile := filepath.Join(tmpDir, "main.asm")
+	objFile := filepath.Join(tmpDir, "main.o")
+	err = os.WriteFile(asmFile, []byte(asmCode), 0644)
 	if err != nil {
-		fmt.Println("C++ файлын жазу қатесі:", err)
+		fmt.Println("Assembly файлын жазу қатесі:", err)
 		os.Exit(1)
 	}
 
 	baseName := strings.TrimSuffix(filepath.Base(inputFile), ".btq")
 	outputBinary := baseName
 
-	cmd := exec.Command("g++", "-O3", "-std=c++17", "-o", outputBinary, cppFile)
-	output, err := cmd.CombinedOutput()
+	// 4a. Assemble with nasm
+	cmdNasm := exec.Command("nasm", "-f", "elf64", "-o", objFile, asmFile)
+	outputNasm, err := cmdNasm.CombinedOutput()
 	if err != nil {
-		fmt.Println("C++ компиляция қатесі:")
-		fmt.Println(string(output))
-		// Print generated code for debug
-		fmt.Println("--- Generated C++ Code ---")
-		fmt.Println(cppCode)
+		fmt.Println("Nasm ассемблер қатесі:")
+		fmt.Println(string(outputNasm))
+		fmt.Println("--- Generated Asm Code ---")
+		fmt.Println(asmCode)
+		os.Exit(1)
+	}
+
+	// 4b. Link with ld
+	cmdLd := exec.Command("ld", "-o", outputBinary, objFile)
+	outputLd, err := cmdLd.CombinedOutput()
+	if err != nil {
+		fmt.Println("Ld линковщик қатесі:")
+		fmt.Println(string(outputLd))
 		os.Exit(1)
 	}
 
 	// Make executable
 	os.Chmod(outputBinary, 0755)
 
-	fmt.Printf("Сәтті! Дербес бағдарлама компиляцияланды (Compiled successfully to standalone native binary): %s\n", outputBinary)
+	fmt.Printf("Сәтті! Дербес бағдарлама компиляцияланды (Compiled successfully to pure machine code): %s\n", outputBinary)
 }

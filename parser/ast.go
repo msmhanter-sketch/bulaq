@@ -98,7 +98,7 @@ func (i *Identifier) TokenLiteral() string { return i.Value }
 func (i *Identifier) String() string       { return i.Value }
 
 type NumberLiteral struct {
-	Value float64
+	Value int64
 }
 
 func (nl *NumberLiteral) expressionNode()      {}

@@ -70,7 +70,7 @@ func (p *Parser) parseExpression() Node {
 
 		switch p.curToken.Type {
 		case lexer.NUMBER:
-			val, _ := strconv.ParseFloat(p.curToken.Literal, 64)
+			val, _ := strconv.ParseInt(p.curToken.Literal, 10, 64)
 			stack = append(stack, &NumberLiteral{Value: val})
 		case lexer.STRING:
 			stack = append(stack, &StringLiteral{Value: p.curToken.Literal})
