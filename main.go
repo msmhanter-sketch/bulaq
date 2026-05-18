@@ -14,7 +14,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Қолдану: butaq <файл.bu>")
+		fmt.Println("Қолдану: butaq <файл.btq>")
 		os.Exit(1)
 	}
 
@@ -70,7 +70,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	baseName := strings.TrimSuffix(filepath.Base(inputFile), ".bu")
+	baseName := strings.TrimSuffix(filepath.Base(inputFile), ".btq")
 	outputBinary := baseName
 
 	cmd := exec.Command("g++", "-O3", "-std=c++17", "-o", outputBinary, cppFile)
