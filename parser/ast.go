@@ -275,6 +275,28 @@ func (vs *VarAssignStatement) String() string {
 	return vs.Name.String() + " " + vs.Value.String() + " болсын"
 }
 
+// arr 0 10 тізім_қой  (array[index] = value)
+type IndexAssignStatement struct {
+	Array *Identifier
+	Index Expression
+	Value Expression
+}
+
+func (ia *IndexAssignStatement) statementNode()       {}
+func (ia *IndexAssignStatement) TokenLiteral() string { return "тізім_қой" }
+func (ia *IndexAssignStatement) String() string {
+	return ia.Array.String() + "[" + ia.Index.String() + "] = " + ia.Value.String()
+}
+
+// arr бос  (free(arr))
+type FreeStatement struct {
+	Value Expression
+}
+
+func (fs *FreeStatement) statementNode()       {}
+func (fs *FreeStatement) TokenLiteral() string { return "бос" }
+func (fs *FreeStatement) String() string       { return "free(" + fs.Value.String() + ")" }
+
 // "Сәлем" жазу
 type PrintStatement struct {
 	Value Expression

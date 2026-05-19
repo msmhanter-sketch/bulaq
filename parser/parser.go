@@ -389,16 +389,46 @@ func (p *Parser) parseExpression() Node {
 			p.errorf("жарамсыз таңба: '%s'", p.curToken.Literal)
 			return nil
 
-		// --- INDEX GET: arr idx алу ---
+		// --- INDEX GET: arr idx тізім_алу ---
 		case lexer.INDEX_GET:
 			if len(stack) < 2 {
-				p.errorf("'алу' 2 операнд талап етеді (тізім, индекс)")
+				p.errorf("'тізім_алу' 2 операнд талап етеді (тізім, индекс)")
 				return nil
 			}
 			idx := stack[len(stack)-1].(Expression)
 			arr := stack[len(stack)-2].(Expression)
 			stack = stack[:len(stack)-2]
 			stack = append(stack, &IndexExpression{Left: arr, Index: idx})
+
+		// --- INDEX SET: arr idx val тізім_қой ---
+		case lexer.INDEX_SET:
+			if len(stack) < 3 {
+				p.errorf("'тізім_қой' 3 операнд талап етеді (тізім, индекс, мән)")
+				return nil
+			}
+			val := stack[len(stack)-1].(Expression)
+			idxSet := stack[len(stack)-2].(Expression)
+			arrNode, ok := stack[len(stack)-3].(*Identifier)
+			if !ok {
+				p.errorf("'тізім_қой' бірінші операнды идентификатор болуы керек")
+				return nil
+			}
+			stack = stack[:len(stack)-3]
+			stmt := &IndexAssignStatement{Array: arrNode, Index: idxSet, Value: val}
+			stack = append(stack, stmt)
+			return stack[0]
+
+		// --- FREE: arr бос ---
+		case lexer.FREE:
+			if len(stack) < 1 {
+				p.errorf("'бос' 1 операнд талап етеді")
+				return nil
+			}
+			val := stack[len(stack)-1].(Expression)
+			stack = stack[:len(stack)-1]
+			stmt := &FreeStatement{Value: val}
+			stack = append(stack, stmt)
+			return stack[0]
 		}
 
 		// болсын: assignment — triggered when VAR token literal is "болсын"

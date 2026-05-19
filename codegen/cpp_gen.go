@@ -97,6 +97,7 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		cg.textSec.WriteString("    extern strcat\n")
 		cg.textSec.WriteString("    extern strcpy\n")
 		cg.textSec.WriteString("    extern malloc\n")
+		cg.textSec.WriteString("    extern free\n")
 		cg.textSec.WriteString("    extern sprintf\n")
 		cg.textSec.WriteString("    extern fopen\n")
 		cg.textSec.WriteString("    extern fclose\n")
@@ -189,6 +190,7 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		out.WriteString("    extern strcat\n")
 		out.WriteString("    extern strcpy\n")
 		out.WriteString("    extern malloc\n")
+		out.WriteString("    extern free\n")
 		out.WriteString("    extern sprintf\n")
 		out.WriteString("    extern fopen\n")
 		out.WriteString("    extern fclose\n")
@@ -317,6 +319,40 @@ func (cg *CppGenerator) genStatement(node parser.Statement, sec *strings.Builder
 		sec.WriteString("    mov rsp, rbp\n")
 		sec.WriteString("    pop rbp\n")
 		sec.WriteString("    ret\n")
+
+	case *parser.IndexAssignStatement:
+		// arr idx val тізім_қой
+		sec.WriteString(fmt.Sprintf("    ; %s[…] тізім_қой\n", n.Array.Value))
+		// Load array pointer into r12
+		off, ok := cg.getVarOffset(n.Array.Value)
+		if !ok {
+			sec.WriteString(fmt.Sprintf("    ; ERROR: undeclared array '%s'\n", n.Array.Value))
+			return
+		}
+		sec.WriteString(fmt.Sprintf("    mov r12, [rbp%+d]\n", off)) // r12 = array ptr
+		// Evaluate index into r13 (int)
+		cg.genExpression(n.Index, sec)
+		sec.WriteString("    cvttsd2si r13, xmm0\n") // r13 = int index
+		sec.WriteString("    imul r13, 8\n")          // byte offset
+		sec.WriteString("    add r13, 8\n")           // skip 8-byte length prefix
+		// Evaluate value into xmm0
+		cg.genExpression(n.Value, sec)
+		// Store xmm0 at array[index]
+		sec.WriteString("    movsd [r12 + r13], xmm0\n")
+
+	case *parser.FreeStatement:
+		// val бос  — free(ptr)
+		sec.WriteString("    ; бос\n")
+		cg.genExpression(n.Value, sec) // rax = pointer
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    mov rcx, rax\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call free\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    mov rdi, rax\n")
+			sec.WriteString("    call free\n")
+		}
 
 	case *parser.CallStatement:
 		cg.genCallExpr(n.Call, sec)

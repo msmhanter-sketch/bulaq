@@ -63,8 +63,10 @@ const (
 	ARRAY      // тізім
 	LBRACKET   // [
 	RBRACKET   // ]
-	INDEX_GET  // алу (context-sensitive: array index get)
+	INDEX_GET  // тізім_алу (array index get)
+	INDEX_SET  // тізім_қой (array index set)
 	ARRAY_LEN  // ұзындық
+	FREE        // бос (free heap memory)
 
 	// Types
 	TYPE_INT    // БҮТІН
@@ -136,6 +138,8 @@ var keywords = map[string]TokenType{
 	"тізім":     ARRAY,
 	"ұзындық":   ARRAY_LEN,
 	"тізім_алу": INDEX_GET,
+	"тізім_қой": INDEX_SET,
+	"бос":        FREE,
 
 	// Types
 	"БҮТІН":  TYPE_INT,
