@@ -5,6 +5,7 @@ import (
 	"butaq/lexer"
 	"butaq/parser"
 	"butaq/typechecker"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,26 +15,65 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("═══════════════════════════════════")
-		fmt.Println("  Butaq тілі — SOV Компиляторы")
-		fmt.Println("═══════════════════════════════════")
-		fmt.Println("Қолдану: butaq <файл.btq>")
+	// CLI Flags
+	var (
+		helpFlag     bool
+		runFlag      bool
+		outputFlag   string
+		platformFlag string
+		asmFileFlag  string
+		verboseFlag  bool
+	)
+
+	flag.BoolVar(&helpFlag, "h", false, "Көмек көрсету")
+	flag.BoolVar(&helpFlag, "help", false, "Көмек көрсету")
+	flag.BoolVar(&runFlag, "r", false, "Бағдарламаны компиляциядан кейін бірден іске қосу")
+	flag.BoolVar(&runFlag, "run", false, "Бағдарламаны компиляциядан кейін бірден іске қосу")
+	flag.StringVar(&outputFlag, "o", "", "Шығыс екілік (binary) файлдың атауы")
+	flag.StringVar(&platformFlag, "platform", "", "Мақсатты платформа (windows немесе linux)")
+	flag.StringVar(&asmFileFlag, "asm", "out.asm", "Генерацияланатын ассемблер файлының атауы")
+	flag.BoolVar(&verboseFlag, "v", false, "Толық компиляция журналдарын көрсету")
+	flag.BoolVar(&verboseFlag, "verbose", false, "Толық компиляция журналдарын көрсету")
+
+	flag.Usage = func() {
+		fmt.Println("═══════════════════════════════════════════════════════════")
+		fmt.Println("             Butaq тілі — SOV Компиляторы (CLI)")
+		fmt.Println("═══════════════════════════════════════════════════════════")
+		fmt.Println("Қолдану: butaq [жалаушалар] <файл.btq>")
 		fmt.Println()
-		fmt.Println("Мысал: butaq math.btq")
-		os.Exit(1)
+		fmt.Println("Жалаушалар:")
+		fmt.Println("  -h, --help        Осы анықтаманы көрсету")
+		fmt.Println("  -r, --run         Компиляциядан кейін бағдарламаны іске қосу")
+		fmt.Println("  -o <файл>         Шығыс файл атауы (әдепкі: кіріс файл аты)")
+		fmt.Println("  --platform <тип>  Платформаны таңдау (windows немесе linux)")
+		fmt.Println("  --asm <файл>      Ассемблер кодын сақтайтын файл (әдепкі: out.asm)")
+		fmt.Println("  -v, --verbose     Толық компиляция барысын шығару")
+		fmt.Println()
+		fmt.Println("Мысалдар:")
+		fmt.Println("  butaq examples/test_complex.btq")
+		fmt.Println("  butaq -r examples/test_loop.btq")
+		fmt.Println("  butaq -o myprog.exe examples/test_complex.btq")
 	}
 
-	inputFile := os.Args[1]
+	flag.Parse()
+
+	if helpFlag || flag.NArg() < 1 {
+		flag.Usage()
+		os.Exit(0)
+	}
+
+	inputFile := flag.Arg(0)
 	sourceCode, err := os.ReadFile(inputFile)
 	if err != nil {
-		fmt.Printf("Қате: файлды оқу мүмкін болмады: %v\n", err)
+		fmt.Printf("❌ Қате: файлды оқу мүмкін болмады: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("🔤 Оқылды: %s (%d байт)\n", inputFile, len(sourceCode))
+	if verboseFlag {
+		fmt.Printf("🔤 Оқылды: %s (%d байт)\n", inputFile, len(sourceCode))
+	}
 
-	// ── 1. Лексер ──────────────────────────────────────────────────────────
+	// ── 1. Лексер + Парсер ──────────────────────────────────────────────────
 	l := lexer.New(string(sourceCode))
 	p := parser.New(l)
 	program := p.ParseProgram()
@@ -45,7 +85,9 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	fmt.Printf("✅ Лексер + Парсер: %d оператор\n", len(program.Statements))
+	if verboseFlag {
+		fmt.Printf("✅ Лексер + Парсер: %d оператор талданды\n", len(program.Statements))
+	}
 
 	// Resolve imports
 	currentDir := filepath.Dir(inputFile)
@@ -66,22 +108,40 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	fmt.Println("✅ Тип тексеру: қате жоқ")
+	if verboseFlag {
+		fmt.Println("✅ Тип тексеру: сәтті аяқталды (қателер жоқ)")
+	}
 
 	// ── 3. NASM x86-64 Assembly кодогенерация ──────────────────────────────
 	platform := codegen.PlatformLinux
-	if runtime.GOOS == "windows" {
-		platform = codegen.PlatformWindows
+	if platformFlag != "" {
+		switch strings.ToLower(platformFlag) {
+		case "windows", "win":
+			platform = codegen.PlatformWindows
+		case "linux":
+			platform = codegen.PlatformLinux
+		default:
+			fmt.Printf("⚠️ Белгісіз платформа '%s'. Ағымдағы ОЖ пайдаланылады.\n", platformFlag)
+			if runtime.GOOS == "windows" {
+				platform = codegen.PlatformWindows
+			}
+		}
+	} else {
+		if runtime.GOOS == "windows" {
+			platform = codegen.PlatformWindows
+		}
 	}
 
 	cg := codegen.NewWithTC(tcEnv, tc, platform)
 	asmCode := cg.Generate(program)
-	fmt.Println("✅ Ассемблер коды генерацияланды")
+	if verboseFlag {
+		fmt.Println("✅ Ассемблер коды сәтті генерацияланды")
+	}
 
 	// ── 4. Сақтау ─────────────────────────────────────────────
-	asmFile := "out.asm"
+	asmFile := asmFileFlag
 	if err := os.WriteFile(asmFile, []byte(asmCode), 0644); err != nil {
-		fmt.Println("Қате: asm файлын жазу мүмкін болмады:", err)
+		fmt.Printf("❌ Қате: ассемблер файлын жазу мүмкін болмады: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -89,19 +149,19 @@ func main() {
 	objFile := baseName + ".o"
 
 	// ── 5. NASM арқылы объектілік файл жасау ────────────────────────────────
-	fmt.Printf("🔧 NASM компиляциясы: %s → %s\n", filepath.Base(asmFile), filepath.Base(objFile))
+	if verboseFlag {
+		fmt.Printf("🔧 NASM компиляциясы: %s → %s\n", filepath.Base(asmFile), filepath.Base(objFile))
+	}
 
 	var nasmArgs []string
 	nasmExe := "nasm"
-	if runtime.GOOS == "windows" {
+	if platform == codegen.PlatformWindows {
 		nasmArgs = []string{"-f", "win64", "-o", objFile, asmFile}
 		if _, err := exec.LookPath("nasm"); err != nil {
 			if _, err := os.Stat("C:\\Program Files\\NASM\\nasm.exe"); err == nil {
 				nasmExe = "C:\\Program Files\\NASM\\nasm.exe"
 			}
 		}
-	} else if runtime.GOOS == "darwin" {
-		nasmArgs = []string{"-f", "macho64", "-o", objFile, asmFile}
 	} else {
 		nasmArgs = []string{"-f", "elf64", "-o", objFile, asmFile}
 	}
@@ -114,24 +174,27 @@ func main() {
 		printNumbered(asmCode)
 		os.Exit(1)
 	}
-	fmt.Println("✅ NASM: объект файл жасалды")
-
-	// ── 6. Линковка ─────────────────────────────────────────────────────────
-	outputBinary := baseName
-	if runtime.GOOS == "windows" {
-		outputBinary += ".exe"
+	if verboseFlag {
+		fmt.Println("✅ NASM: объект файл жасалды")
 	}
 
-	fmt.Printf("🔗 Линковка: %s → %s\n", filepath.Base(objFile), outputBinary)
+	// ── 6. Линковка ─────────────────────────────────────────────────────────
+	outputBinary := outputFlag
+	if outputBinary == "" {
+		outputBinary = baseName
+		if platform == codegen.PlatformWindows {
+			outputBinary += ".exe"
+		}
+	}
+
+	if verboseFlag {
+		fmt.Printf("🔗 Линковка: %s → %s\n", filepath.Base(objFile), outputBinary)
+	}
 
 	var linkCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		// Windows: link with gcc (MinGW) or cl
+	if platform == codegen.PlatformWindows {
 		linkCmd = exec.Command("gcc", "-o", outputBinary, objFile, "-lkernel32", "-lmsvcrt")
-	} else if runtime.GOOS == "darwin" {
-		linkCmd = exec.Command("ld", "-o", outputBinary, objFile, "-lSystem", "-L/usr/lib")
 	} else {
-		// Linux: link with gcc to get libc (for printf)
 		linkCmd = exec.Command("gcc", "-o", outputBinary, objFile, "-no-pie", "-lc")
 	}
 
@@ -144,11 +207,48 @@ func main() {
 
 	os.Chmod(outputBinary, 0755)
 
-	fmt.Println()
-	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("  ✅ Сәтті! Дербес бағдарлама жасалды: ./%s\n", outputBinary)
-	fmt.Println("  (Таза x86-64 машина коды — C++ жоқ, Go жоқ!)")
-	fmt.Println("═══════════════════════════════════════════════════════════")
+	// Clean up intermediate object file
+	os.Remove(objFile)
+	if asmFileFlag == "out.asm" {
+		os.Remove("out.asm") // Delete default asm file
+	}
+
+	if verboseFlag {
+		fmt.Println("🧹 Аралық объектілік файлдар тазартылды")
+	}
+
+	if !runFlag {
+		fmt.Println()
+		fmt.Println("═══════════════════════════════════════════════════════════")
+		fmt.Printf("  ✅ Сәтті! Дербес бағдарлама жасалды: ./%s\n", outputBinary)
+		fmt.Println("  (Таза x86-64 машина коды — C++ жоқ, Go жоқ!)")
+		fmt.Println("═══════════════════════════════════════════════════════════")
+	} else {
+		// Run the program immediately
+		var cmd *exec.Cmd
+		if filepath.IsAbs(outputBinary) || strings.Contains(outputBinary, string(filepath.Separator)) {
+			cmd = exec.Command(outputBinary)
+		} else {
+			cmd = exec.Command("." + string(filepath.Separator) + outputBinary)
+		}
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+
+		if verboseFlag {
+			fmt.Printf("🚀 Бағдарлама іске қосылуда: %s\n\n", outputBinary)
+		}
+		runErr := cmd.Run()
+
+		// Clean up binary if it was a temporary run
+		if outputFlag == "" {
+			os.Remove(outputBinary)
+		}
+
+		if runErr != nil {
+			os.Exit(1)
+		}
+	}
 }
 
 func printNumbered(code string) {

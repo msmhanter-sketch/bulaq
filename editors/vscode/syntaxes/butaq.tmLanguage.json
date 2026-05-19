@@ -1,0 +1,109 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Butaq",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#identifiers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.butaq",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.butaq",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.butaq",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.butaq",
+          "match": "\\b\\d+\\.\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.butaq",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.butaq",
+          "match": "\\b(егер|әйтпесе|әзірше|үзу|жалғастыру|қайтару|енгізу)\\b"
+        },
+        {
+          "name": "keyword.operator.word.butaq",
+          "match": "\\b(болсын|алу|қосу|азайту|жасу|жасау|бос|шақыру|тізім_алу|тізім_ұзындығы|бойынша|дейін)\\b"
+        },
+        {
+          "name": "storage.type.function.butaq",
+          "match": "\\b(функция)\\b"
+        },
+        {
+          "name": "storage.type.struct.butaq",
+          "match": "\\b(құрылым)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.butaq",
+          "match": "\\b(САН|МӘТІН|БҮТІН|ЛОГИКА)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.butaq",
+          "match": "\\b(мәтін_ұзындығы|таңба|бүтін|кездейсоқ|жазу)\\b"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.butaq",
+          "match": "\\b[a-zA-Zа-яА-ЯәғқңөұүһіӘҒҚҢӨҰҮҺІ_][a-zA-Zа-яА-ЯәғқңөұүһіӘҒҚҢӨҰҮҺІ0-9_]*\\b"
+        }
+      ]
+    }
+  ],
+  "scopeName": "source.butaq"
+}
