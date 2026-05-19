@@ -183,7 +183,19 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 	if cg.platform == PlatformLinux {
 		out.WriteString("    extern printf\n")
 		out.WriteString("    extern fflush\n")
-		out.WriteString("    extern stdout\n\n")
+		out.WriteString("    extern stdout\n")
+		out.WriteString("    extern strlen\n")
+		out.WriteString("    extern strcmp\n")
+		out.WriteString("    extern strcat\n")
+		out.WriteString("    extern strcpy\n")
+		out.WriteString("    extern malloc\n")
+		out.WriteString("    extern sprintf\n")
+		out.WriteString("    extern fopen\n")
+		out.WriteString("    extern fclose\n")
+		out.WriteString("    extern fread\n")
+		out.WriteString("    extern fwrite\n")
+		out.WriteString("    extern fseek\n")
+		out.WriteString("    extern ftell\n\n")
 	}
 
 	out.WriteString(cg.dataSec.String())
@@ -205,25 +217,29 @@ func (cg *CppGenerator) calcStackSize(stmts []parser.Statement) int {
 }
 
 func (cg *CppGenerator) countVars(stmts []parser.Statement) int {
-	count := 0
+	seen := make(map[string]bool)
+	cg.collectUniqueVarNames(stmts, seen)
+	return len(seen)
+}
+
+func (cg *CppGenerator) collectUniqueVarNames(stmts []parser.Statement, seen map[string]bool) {
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *parser.VarAssignStatement:
-			count++
+			seen[s.Name.Value] = true
 		case *parser.IfStatement:
 			if s.Consequence != nil {
-				count += cg.countVars(s.Consequence.Statements)
+				cg.collectUniqueVarNames(s.Consequence.Statements, seen)
 			}
 			if s.Alternative != nil {
-				count += cg.countVars(s.Alternative.Statements)
+				cg.collectUniqueVarNames(s.Alternative.Statements, seen)
 			}
 		case *parser.WhileStatement:
 			if s.Body != nil {
-				count += cg.countVars(s.Body.Statements)
+				cg.collectUniqueVarNames(s.Body.Statements, seen)
 			}
 		}
 	}
-	return count
 }
 
 func alignTo16(n int) int {
@@ -331,8 +347,9 @@ func (cg *CppGenerator) genVarAssign(n *parser.VarAssignStatement, sec *strings.
 		*parser.StrEqExpression,
 		*parser.ToStrExpression, *parser.CharAtExpression,
 		*parser.BoolLiteral,
-		*parser.FileReadExpression:
-		// String/bool: result in rax
+		*parser.FileReadExpression,
+		*parser.ArrayLiteral:
+		// String/bool/array: result in rax (pointer or boolean)
 		sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
 		cg.varIsString[n.Name.Value] = true
 	case *parser.NumberLiteral, *parser.PostfixExpression, *parser.CharCodeExpression,
@@ -341,22 +358,28 @@ func (cg *CppGenerator) genVarAssign(n *parser.VarAssignStatement, sec *strings.
 		sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
 		cg.varIsString[n.Name.Value] = false
 	default:
-		// Identifier or call. We must know the type to avoid corrupting float with garbage rax.
-		exprType := cg.tc.Check(n.Value, cg.env)
-		if exprType == typechecker.STRING_TYPE || cg.isStringExpr(n.Value) {
+		// Identifier, call expression, or other — derive type from typechecker.
+		var exprType typechecker.Type
+
+		// For call expressions, look up the function's inferred return type directly.
+		if call, ok := n.Value.(*parser.CallExpression); ok {
+			if sig, found := cg.funcs[call.Function]; found && sig.ReturnType != typechecker.UNKNOWN {
+				exprType = sig.ReturnType
+			} else {
+				exprType = cg.tc.Check(n.Value, cg.env)
+			}
+		} else {
+			exprType = cg.tc.Check(n.Value, cg.env)
+		}
+
+		if exprType == typechecker.STRING_TYPE || exprType == typechecker.ARRAY_TYPE || cg.isStringExpr(n.Value) {
 			sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
 			cg.varIsString[n.Name.Value] = true
 		} else if exprType == typechecker.NUMBER_TYPE || exprType == typechecker.INT_TYPE {
 			sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
 			cg.varIsString[n.Name.Value] = false
 		} else {
-			// UNKNOWN type (e.g. function call with untyped return).
-			// We cannot store both in the same 8-byte slot without corruption.
-			// Default to storing xmm0 but we warn/hope it's a number?
-			// Actually, let's look at the function declaration return type. Wait, Butaq has no explicit return types!
-			// For now, if we don't know, we assume numeric. To support string returns from functions,
-			// we need a mechanism. But wait! `isStringExpr` checks for string functions!
-			// If it's a function call, we can assume it's numeric UNLESS we know otherwise.
+			// Still unknown — store xmm0 as numeric default.
 			sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
 			cg.varIsString[n.Name.Value] = false
 		}
@@ -375,6 +398,11 @@ func (cg *CppGenerator) isStringExpr(e parser.Expression) bool {
 		return true
 	case *parser.Identifier:
 		return cg.varIsString[val.Value]
+	case *parser.CallExpression:
+		// Check if the function's inferred return type is string
+		if sig, ok := cg.funcs[val.Function]; ok {
+			return sig.ReturnType == typechecker.STRING_TYPE
+		}
 	}
 	return false
 }
@@ -756,18 +784,27 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		sec.WriteString("    lea rax, [numstr_buf]\n")
 
 	case *parser.LengthExpression:
-		// Kept for backward compat — same as StrLen
+		// Array length (ұзындық) or string length.
+		// Determine type from typechecker.
+		exprType := cg.tc.Check(n.Value, cg.env)
 		cg.genExpression(n.Value, sec)
-		if cg.platform == PlatformWindows {
-			sec.WriteString("    mov rcx, rax\n")
-			sec.WriteString("    sub rsp, 32\n")
-			sec.WriteString("    call strlen\n")
-			sec.WriteString("    add rsp, 32\n")
+		if exprType == typechecker.ARRAY_TYPE {
+			// Array pointer is in rax, length is at [rax]
+			sec.WriteString("    mov r10, [rax]\n")
+			sec.WriteString("    cvtsi2sd xmm0, r10\n")
 		} else {
-			sec.WriteString("    mov rdi, rax\n")
-			sec.WriteString("    call strlen\n")
+			// Assume String
+			if cg.platform == PlatformWindows {
+				sec.WriteString("    mov rcx, rax\n")
+				sec.WriteString("    sub rsp, 32\n")
+				sec.WriteString("    call strlen\n")
+				sec.WriteString("    add rsp, 32\n")
+			} else {
+				sec.WriteString("    mov rdi, rax\n")
+				sec.WriteString("    call strlen\n")
+			}
+			sec.WriteString("    cvtsi2sd xmm0, rax\n")
 		}
-		sec.WriteString("    cvtsi2sd xmm0, rax\n")
 
 	case *parser.CharCodeExpression:
 		cg.genExpression(n.Value, sec)
@@ -791,9 +828,47 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		cg.genFileRead(n, sec)
 
 	case *parser.ArrayLiteral:
-		// Arrays will be heap-allocated in a future phase
-		sec.WriteString("    ; тізім — TODO: heap allocation\n")
-		sec.WriteString("    xor rax, rax\n")
+		// Heap-allocate array: length prefix (8 bytes) + each element (8 bytes float64).
+		// Layout: [length_i64, element0_f64, element1_f64, ...]
+		// rax = pointer to array base (points to length_i64) after malloc.
+		nElems := len(n.Elements)
+		allocSize := (nElems * 8) + 8
+		sec.WriteString(fmt.Sprintf("    ; тізім — %d элемент, malloc(%d)\n", nElems, allocSize))
+		
+		if cg.platform == PlatformWindows {
+			sec.WriteString(fmt.Sprintf("    mov rcx, %d\n", allocSize))
+			// Windows stack align shadow space
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call malloc\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString(fmt.Sprintf("    mov rdi, %d\n", allocSize))
+			sec.WriteString("    call malloc\n")
+		}
+		sec.WriteString("    mov r12, rax\n") // r12 = array base
+		// Store length
+		sec.WriteString(fmt.Sprintf("    mov qword [r12], %d\n", nElems))
+		
+		// Fill each element
+		for i, elem := range n.Elements {
+			cg.genExpression(elem, sec)
+			// result in xmm0
+			sec.WriteString(fmt.Sprintf("    movsd [r12 + %d], xmm0\n", 8 + i*8))
+		}
+		sec.WriteString("    mov rax, r12\n") // return pointer
+
+	case *parser.IndexExpression:
+		// arr idx алу — load float element at index
+		cg.genExpression(n.Left, sec)
+		sec.WriteString("    mov r12, rax\n") // r12 = array base pointer
+		cg.genExpression(n.Index, sec)
+		// xmm0 = index as float
+		sec.WriteString("    cvttsd2si r13, xmm0\n") // r13 = int index
+		sec.WriteString("    imul r13, 8\n")          // byte offset = index * 8
+		sec.WriteString("    add r13, 8\n")           // skip 8-byte length prefix
+		sec.WriteString("    movsd xmm0, [r12 + r13]\n")
+		// also load as rax for possible pointer use
+		sec.WriteString("    movq rax, xmm0\n")
 	}
 }
 
@@ -1026,23 +1101,74 @@ func (cg *CppGenerator) genBinaryOp(n *parser.PostfixExpression, sec *strings.Bu
 // Function call
 // ---------------------------------------------------------------------------
 
-var linuxArgRegs = []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
+var linuxArgRegs  = []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
 var linuxFloatRegs = []string{"xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5"}
+var winArgRegs    = []string{"rcx", "rdx", "r8", "r9"}
+var winFloatRegs  = []string{"xmm0", "xmm1", "xmm2", "xmm3"}
 
 func (cg *CppGenerator) genCallExpr(n *parser.CallExpression, sec *strings.Builder) {
 	sec.WriteString(fmt.Sprintf("    ; шақыру %s\n", n.Function))
 
-	// Evaluate arguments and push them
-	// We evaluate in order and place in registers per ABI
+	nArgs := len(n.Arguments)
+	if nArgs == 0 {
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    sub rsp, 32\n")
+		}
+		sec.WriteString(fmt.Sprintf("    call %s\n", n.Function))
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    add rsp, 32\n")
+		}
+		return
+	}
+
+	// Step 1: Evaluate all arguments in order and push each onto the stack.
+	// We track which args are string/pointer so we know which register lane to use.
+	argIsStr := make([]bool, nArgs)
 	for i, arg := range n.Arguments {
 		cg.genExpression(arg, sec)
-		if cg.isStringExpr(arg) {
-			sec.WriteString("    movq xmm0, rax\n") // sync pointer to xmm0 for passing
-		}
-		if i < len(linuxFloatRegs) {
-			sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", linuxFloatRegs[i]))
+		argIsStr[i] = cg.isStringExpr(arg)
+		if argIsStr[i] {
+			// Pointer is in rax — push rax
+			sec.WriteString("    sub rsp, 8\n")
+			sec.WriteString("    mov [rsp], rax\n")
+		} else {
+			// Float is in xmm0 — push as qword
+			sec.WriteString("    sub rsp, 8\n")
+			sec.WriteString("    movsd [rsp], xmm0\n")
 		}
 	}
+
+	// Step 2: Pop arguments in reverse order into the correct ABI registers.
+	// Arguments were pushed left-to-right, so the stack is [ arg0, arg1, ..., argN-1 ] (argN-1 at top).
+	for i := nArgs - 1; i >= 0; i-- {
+		if argIsStr[i] {
+			sec.WriteString("    pop rax\n") // pointer
+			if cg.platform == PlatformLinux {
+				if i < len(linuxArgRegs) {
+					sec.WriteString(fmt.Sprintf("    mov %s, rax\n", linuxArgRegs[i]))
+				}
+			} else {
+				if i < len(winArgRegs) {
+					sec.WriteString(fmt.Sprintf("    mov %s, rax\n", winArgRegs[i]))
+				}
+			}
+		} else {
+			sec.WriteString("    movsd xmm0, [rsp]\n")
+			sec.WriteString("    add rsp, 8\n")
+			if cg.platform == PlatformLinux {
+				if i < len(linuxFloatRegs) {
+					sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", linuxFloatRegs[i]))
+				}
+			} else {
+				if i < len(winFloatRegs) {
+					// Windows x64: float arg must be in BOTH the XMM reg AND the corresponding int reg
+					sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", winFloatRegs[i]))
+					sec.WriteString(fmt.Sprintf("    movq %s, xmm0\n", winArgRegs[i]))
+				}
+			}
+		}
+	}
+
 	if cg.platform == PlatformWindows {
 		sec.WriteString("    sub rsp, 32\n")
 	}
@@ -1090,14 +1216,23 @@ func (cg *CppGenerator) genFunctionDef(fs *parser.FunctionStatement) {
 	// Map parameters to stack
 	for i, param := range fs.Parameters {
 		off := cg.allocVar(param)
-		if i < len(linuxFloatRegs) {
-			sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], %s  ; param %s\n", off, linuxFloatRegs[i], param))
-		}
+		isStr := false
 		if sig != nil && i < len(sig.ParamTypes) {
-			if sig.ParamTypes[i] == typechecker.STRING_TYPE {
-				cg.varIsString[param] = true
-			} else {
-				cg.varIsString[param] = false
+			isStr = sig.ParamTypes[i] == typechecker.STRING_TYPE
+		}
+		cg.varIsString[param] = isStr
+
+		if isStr {
+			// String/pointer arg: lives in integer arg register (rdi, rsi, ...)
+			if cg.platform == PlatformLinux && i < len(linuxArgRegs) {
+				sec.WriteString(fmt.Sprintf("    mov [rbp%+d], %s  ; param str %s\n", off, linuxArgRegs[i], param))
+			} else if cg.platform == PlatformWindows && i < len(winArgRegs) {
+				sec.WriteString(fmt.Sprintf("    mov [rbp%+d], %s  ; param str %s\n", off, winArgRegs[i], param))
+			}
+		} else {
+			// Numeric arg: lives in xmm register
+			if i < len(linuxFloatRegs) {
+				sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], %s  ; param num %s\n", off, linuxFloatRegs[i], param))
 			}
 		}
 	}

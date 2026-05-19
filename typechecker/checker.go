@@ -73,9 +73,10 @@ type FuncSig struct {
 // ---------------------------------------------------------------------------
 
 type TypeChecker struct {
-	globalEnv *TypeEnv
-	funcs     map[string]*FuncSig
-	Errors    []string
+	globalEnv   *TypeEnv
+	funcs       map[string]*FuncSig
+	Errors      []string
+	currentFunc string // tracks which function we are checking
 }
 
 func New() *TypeChecker {
@@ -263,7 +264,16 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 
 	// --- Return ---
 	case *parser.ReturnStatement:
-		return tc.Check(node.Value, env)
+		ret := tc.Check(node.Value, env)
+		// Propagate return type into the current function's signature
+		if tc.currentFunc != "" {
+			if sig, ok := tc.funcs[tc.currentFunc]; ok {
+				if sig.ReturnType == UNKNOWN && ret != UNKNOWN {
+					sig.ReturnType = ret
+				}
+			}
+		}
+		return ret
 
 	// --- Call expression ---
 	case *parser.CallExpression:
@@ -296,12 +306,11 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		for _, stmt := range node.Statements {
 			tc.Check(stmt, blockEnv)
 		}
-		// Propagate variable declarations to outer env for variables assigned in blocks
-		// (needed for while loops updating outer variables)
+		// Propagate updated variable types back to outer env
+		// (needed for while-loops that mutate outer variables)
 		for name, t := range blockEnv.store {
-			if _, exists := env.Get(name); !exists {
-				// new variable declared inside block - keep it local
-				_ = t
+			if _, exists := env.Get(name); exists {
+				env.Set(name, t)
 			}
 		}
 		return UNKNOWN
@@ -338,7 +347,43 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 			}
 			funcEnv.Set(param, pt)
 		}
+		// Track current function for return type inference
+		prevFunc := tc.currentFunc
+		tc.currentFunc = node.Name
 		tc.Check(node.Body, funcEnv)
+		tc.currentFunc = prevFunc
+		// Infer param types from how the function body uses them
+		if sig != nil {
+			for i, param := range node.Parameters {
+				if sig.ParamTypes[i] == UNKNOWN {
+					if t, ok := funcEnv.Get(param); ok && t != UNKNOWN {
+						sig.ParamTypes[i] = t
+					}
+				}
+			}
+		}
+		return VOID_TYPE
+
+	// --- String operations (not covered above) ---
+	case *parser.StrConcatExpression:
+		tc.Check(node.Left, env)
+		tc.Check(node.Right, env)
+		return STRING_TYPE
+
+	case *parser.StrEqExpression:
+		tc.Check(node.Left, env)
+		tc.Check(node.Right, env)
+		return BOOL_TYPE
+
+	case *parser.StrLenExpression:
+		tc.Check(node.Value, env)
+		return NUMBER_TYPE
+
+	case *parser.ToStrExpression:
+		tc.Check(node.Value, env)
+		return STRING_TYPE
+
+	case *parser.FileWriteStatement:
 		return VOID_TYPE
 
 	// --- Expression statement ---
@@ -348,6 +393,7 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 
 	return UNKNOWN
 }
+
 
 // ---------------------------------------------------------------------------
 // Function registration (first pass)

@@ -388,6 +388,17 @@ func (p *Parser) parseExpression() Node {
 		case lexer.ILLEGAL:
 			p.errorf("жарамсыз таңба: '%s'", p.curToken.Literal)
 			return nil
+
+		// --- INDEX GET: arr idx алу ---
+		case lexer.INDEX_GET:
+			if len(stack) < 2 {
+				p.errorf("'алу' 2 операнд талап етеді (тізім, индекс)")
+				return nil
+			}
+			idx := stack[len(stack)-1].(Expression)
+			arr := stack[len(stack)-2].(Expression)
+			stack = stack[:len(stack)-2]
+			stack = append(stack, &IndexExpression{Left: arr, Index: idx})
 		}
 
 		// болсын: assignment — triggered when VAR token literal is "болсын"
@@ -433,19 +444,123 @@ func (p *Parser) parseCallExpression(name string) *CallExpression {
 
 	var args []Expression
 	for p.curToken.Type != lexer.RPAREN && p.curToken.Type != lexer.EOF {
-		// Each argument is a single-token expression for now
-		// (we support simple literals and identifiers as args; complex exprs TBD)
-		expr := p.parseSingleExpression()
+		expr := p.parseArgExpression()
 		if expr != nil {
 			args = append(args, expr)
 		}
-		p.nextToken()
 		if p.curToken.Type == lexer.COMMA {
 			p.nextToken()
 		}
 	}
 	// cur = )
 	return &CallExpression{Function: name, Arguments: args}
+}
+
+// parseArgExpression parses one argument expression which may be a postfix
+// (SOV) binary expression, e.g. "x y қосу" or just a literal/identifier.
+func (p *Parser) parseArgExpression() Expression {
+	var stack []Expression
+	for p.curToken.Type != lexer.RPAREN &&
+		p.curToken.Type != lexer.COMMA &&
+		p.curToken.Type != lexer.EOF {
+
+		switch p.curToken.Type {
+		case lexer.NUMBER:
+			val, err := strconv.ParseFloat(p.curToken.Literal, 64)
+			if err == nil {
+				stack = append(stack, &NumberLiteral{Value: val})
+			}
+		case lexer.STRING:
+			stack = append(stack, &StringLiteral{Value: p.curToken.Literal})
+		case lexer.TRUE:
+			stack = append(stack, &BoolLiteral{Value: true})
+		case lexer.FALSE:
+			stack = append(stack, &BoolLiteral{Value: false})
+		case lexer.IDENTIFIER:
+			if p.peekToken.Type == lexer.LPAREN {
+				callExpr := p.parseCallExpression(p.curToken.Literal)
+				if callExpr != nil {
+					stack = append(stack, callExpr)
+					continue
+				}
+			} else {
+				stack = append(stack, &Identifier{Value: p.curToken.Literal})
+			}
+		case lexer.PLUS, lexer.MINUS, lexer.MUL, lexer.DIV,
+			lexer.GT, lexer.LT, lexer.EQ, lexer.NEQ, lexer.GTE, lexer.LTE,
+			lexer.AND, lexer.OR:
+			if len(stack) >= 2 {
+				right := stack[len(stack)-1]
+				left := stack[len(stack)-2]
+				stack = stack[:len(stack)-2]
+				stack = append(stack, &PostfixExpression{Left: left, Right: right, Operator: p.curToken.Literal})
+			}
+		case lexer.NOT:
+			if len(stack) >= 1 {
+				val := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				stack = append(stack, &UnaryExpression{Operator: "емес", Right: val})
+			}
+		case lexer.STR_CONCAT:
+			if len(stack) >= 2 {
+				right := stack[len(stack)-1]
+				left := stack[len(stack)-2]
+				stack = stack[:len(stack)-2]
+				stack = append(stack, &StrConcatExpression{Left: left, Right: right})
+			}
+		case lexer.STR_LEN:
+			if len(stack) >= 1 {
+				val := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				stack = append(stack, &StrLenExpression{Value: val})
+			}
+		case lexer.STR_EQ:
+			if len(stack) >= 2 {
+				right := stack[len(stack)-1]
+				left := stack[len(stack)-2]
+				stack = stack[:len(stack)-2]
+				stack = append(stack, &StrEqExpression{Left: left, Right: right})
+			}
+		case lexer.TO_STR:
+			if len(stack) >= 1 {
+				val := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				stack = append(stack, &ToStrExpression{Value: val})
+			}
+		case lexer.CHAR_CODE:
+			if len(stack) >= 1 {
+				val := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				stack = append(stack, &CharCodeExpression{Value: val})
+			}
+		case lexer.CHAR_AT:
+			if len(stack) >= 2 {
+				idx := stack[len(stack)-1]
+				str := stack[len(stack)-2]
+				stack = stack[:len(stack)-2]
+				stack = append(stack, &CharAtExpression{Str: str, Index: idx})
+			}
+		case lexer.ARRAY_LEN:
+			if len(stack) >= 1 {
+				val := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				stack = append(stack, &LengthExpression{Value: val})
+			}
+		case lexer.INDEX_GET:
+			if len(stack) >= 2 {
+				idx := stack[len(stack)-1]
+				arr := stack[len(stack)-2]
+				stack = stack[:len(stack)-2]
+				stack = append(stack, &IndexExpression{Left: arr, Index: idx})
+			}
+		}
+		p.nextToken()
+	}
+
+	if len(stack) > 0 {
+		return stack[len(stack)-1]
+	}
+	return nil
 }
 
 // parseSingleExpression parses one atomic expression (literal or identifier).

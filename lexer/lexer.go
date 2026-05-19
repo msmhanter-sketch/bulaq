@@ -133,8 +133,9 @@ var keywords = map[string]TokenType{
 	"жалған":  FALSE,
 
 	// Arrays
-	"тізім":    ARRAY,
-	"ұзындық":  ARRAY_LEN,
+	"тізім":     ARRAY,
+	"ұзындық":   ARRAY_LEN,
+	"тізім_алу": INDEX_GET,
 
 	// Types
 	"БҮТІН":  TYPE_INT,
