@@ -47,6 +47,13 @@ func main() {
 	}
 	fmt.Printf("✅ Лексер + Парсер: %d оператор\n", len(program.Statements))
 
+	// Resolve imports
+	currentDir := filepath.Dir(inputFile)
+	if err := parser.ResolveImports(program, currentDir); err != nil {
+		fmt.Printf("❌ Енгізу қатесі: %v\n", err)
+		os.Exit(1)
+	}
+
 	// ── 2. Статикалық типтер тексеру ───────────────────────────────────────
 	tcEnv := typechecker.NewTypeEnv()
 	tc := typechecker.New()

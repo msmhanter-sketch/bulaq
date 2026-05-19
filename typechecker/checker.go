@@ -3,6 +3,7 @@ package typechecker
 import (
 	"butaq/parser"
 	"fmt"
+	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,7 @@ const (
 	INT_TYPE    Type = "БҮТІН"
 	BYTE_TYPE   Type = "БАЙТ"
 	ARRAY_TYPE  Type = "ТІЗІМ"
+	STRUCT_TYPE Type = "ҚҰРЫЛЫМ"
 	VOID_TYPE   Type = "БОС"
 	UNKNOWN     Type = "БЕЛГІСІЗ"
 )
@@ -75,16 +77,46 @@ type FuncSig struct {
 type TypeChecker struct {
 	globalEnv   *TypeEnv
 	funcs       map[string]*FuncSig
+	structs     map[string]*parser.StructStatement
 	Errors      []string
 	currentFunc string // tracks which function we are checking
 }
 
 func New() *TypeChecker {
-	return &TypeChecker{
+	tc := &TypeChecker{
 		globalEnv: NewTypeEnv(),
 		funcs:     make(map[string]*FuncSig),
+		structs:   make(map[string]*parser.StructStatement),
 		Errors:    []string{},
 	}
+
+	tc.funcs["мәтін_ұзындығы"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["таңба"] = &FuncSig{
+		Params:     []string{"код"},
+		ParamTypes: []Type{INT_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["бүтін"] = &FuncSig{
+		Params:     []string{"сан"},
+		ParamTypes: []Type{NUMBER_TYPE},
+		ReturnType: INT_TYPE,
+	}
+	tc.funcs["кездейсоқ"] = &FuncSig{
+		Params:     []string{},
+		ParamTypes: []Type{},
+		ReturnType: NUMBER_TYPE,
+	}
+
+	return tc
+}
+
+// GetStructs returns the struct definitions (used by codegen)
+func (tc *TypeChecker) GetStructs() map[string]*parser.StructStatement {
+	return tc.structs
 }
 
 func (tc *TypeChecker) errorf(format string, args ...interface{}) {
@@ -104,10 +136,12 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 	switch node := node.(type) {
 
 	case *parser.Program:
-		// First pass: register all function signatures
+		// First pass: register all function signatures and structs
 		for _, stmt := range node.Statements {
 			if fs, ok := stmt.(*parser.FunctionStatement); ok {
 				tc.registerFunction(fs, env)
+			} else if ss, ok := stmt.(*parser.StructStatement); ok {
+				tc.structs[ss.Name] = ss
 			}
 		}
 		// Second pass: check everything
@@ -181,7 +215,7 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		case "үлкен", "кіші", "тең", "тең_емес", "үлкен_тең", "кіші_тең":
 			isLeftNum := (leftType == NUMBER_TYPE || leftType == INT_TYPE)
 			isRightNum := (rightType == NUMBER_TYPE || rightType == INT_TYPE)
-			if (isLeftNum && isRightNum) {
+			if isLeftNum && isRightNum {
 				return BOOL_TYPE
 			}
 			if leftType != rightType {
@@ -200,11 +234,162 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		}
 		return UNKNOWN
 
+	// --- Struct Operations ---
+	case *parser.StructStatement:
+		return VOID_TYPE
+
+	case *parser.StructCreateExpression:
+		if _, ok := tc.structs[node.StructName]; !ok {
+			tc.errorf("'%s' құрылымы табылған жоқ", node.StructName)
+		}
+		return Type("ҚҰРЫЛЫМ_" + node.StructName)
+
+	case *parser.StructFieldAccessExpression:
+		var structName string
+		if node.Target != nil {
+			targetType := tc.Check(node.Target, env)
+			if targetType == UNKNOWN {
+				return UNKNOWN
+			}
+			if !strings.HasPrefix(string(targetType), "ҚҰРЫЛЫМ_") {
+				tc.errorf("өріс алу қатесі: объект құрылым емес: %s", targetType)
+				return UNKNOWN
+			}
+			structName = string(targetType)[len("ҚҰРЫЛЫМ_"):]
+		} else {
+			t, ok := env.Get(node.StructName)
+			if !ok {
+				tc.errorf("'%s' айнымалысы жарияланбаған", node.StructName)
+				return UNKNOWN
+			}
+			if !strings.HasPrefix(string(t), "ҚҰРЫЛЫМ_") {
+				tc.errorf("'%s' айнымалысы құрылым емес", node.StructName)
+				return UNKNOWN
+			}
+			structName = string(t)[len("ҚҰРЫЛЫМ_"):]
+		}
+		parts := strings.Split(node.Field, ".")
+
+		var currentStructType = structName
+		var fieldTypeStr string
+
+		for _, part := range parts {
+			structDef, ok := tc.structs[currentStructType]
+			if !ok {
+				tc.errorf("'%s' құрылымы табылған жоқ", currentStructType)
+				return UNKNOWN
+			}
+			fieldIdx := -1
+			for idx, f := range structDef.Fields {
+				if f == part {
+					fieldIdx = idx
+					break
+				}
+			}
+			if fieldIdx == -1 {
+				tc.errorf("'%s' құрылымында '%s' өрісі жоқ", currentStructType, part)
+				return UNKNOWN
+			}
+			fieldTypeStr = structDef.Types[fieldIdx]
+			currentStructType = fieldTypeStr
+		}
+		switch fieldTypeStr {
+		case "БҮТІН":
+			return INT_TYPE
+		case "САН":
+			return NUMBER_TYPE
+		case "МӘТІН":
+			return STRING_TYPE
+		case "АҚИҚАТ":
+			return BOOL_TYPE
+		case "БАЙТ":
+			return BYTE_TYPE
+		default:
+			return Type("ҚҰРЫЛЫМ_" + fieldTypeStr)
+		}
+
+	case *parser.StructFieldAssignStatement:
+		valType := tc.Check(node.Value, env)
+		var structName string
+		if node.Target != nil {
+			targetType := tc.Check(node.Target, env)
+			if targetType == UNKNOWN {
+				return VOID_TYPE
+			}
+			if !strings.HasPrefix(string(targetType), "ҚҰРЫЛЫМ_") {
+				tc.errorf("өріске меншіктеу қатесі: объект құрылым емес: %s", targetType)
+				return VOID_TYPE
+			}
+			structName = string(targetType)[len("ҚҰРЫЛЫМ_"):]
+		} else {
+			t, ok := env.Get(node.StructName)
+			if !ok {
+				tc.errorf("'%s' айнымалысы жарияланбаған", node.StructName)
+				return VOID_TYPE
+			}
+			if !strings.HasPrefix(string(t), "ҚҰРЫЛЫМ_") {
+				tc.errorf("'%s' айнымалысы құрылым емес", node.StructName)
+				return VOID_TYPE
+			}
+			structName = string(t)[len("ҚҰРЫЛЫМ_"):]
+		}
+		parts := strings.Split(node.Field, ".")
+
+		var currentStructType = structName
+		var fieldTypeStr string
+
+		for _, part := range parts {
+			structDef, ok := tc.structs[currentStructType]
+			if !ok {
+				tc.errorf("'%s' құрылымы табылған жоқ", currentStructType)
+				return VOID_TYPE
+			}
+			fieldIdx := -1
+			for idx, f := range structDef.Fields {
+				if f == part {
+					fieldIdx = idx
+					break
+				}
+			}
+			if fieldIdx == -1 {
+				tc.errorf("'%s' құрылымында '%s' өрісі жоқ", currentStructType, part)
+				return VOID_TYPE
+			}
+			fieldTypeStr = structDef.Types[fieldIdx]
+			currentStructType = fieldTypeStr
+		}
+
+		var expectedType Type
+		switch fieldTypeStr {
+		case "БҮТІН":
+			expectedType = INT_TYPE
+		case "САН":
+			expectedType = NUMBER_TYPE
+		case "МӘТІН":
+			expectedType = STRING_TYPE
+		case "АҚИҚАТ":
+			expectedType = BOOL_TYPE
+		case "БАЙТ":
+			expectedType = BYTE_TYPE
+		default:
+			expectedType = Type("ҚҰРЫЛЫМ_" + fieldTypeStr)
+		}
+		if valType != expectedType && valType != UNKNOWN {
+			if expectedType == NUMBER_TYPE && valType == INT_TYPE {
+				// Promotion allowed
+			} else if strings.HasPrefix(string(expectedType), "ҚҰРЫЛЫМ_") && valType == INT_TYPE {
+				// Null pointer assignment allowed
+			} else {
+				tc.errorf("меншіктеу қатесі: '%s.%s' өрісі %s типін күтеді, бірақ %s берілді", structName, node.Field, expectedType, valType)
+			}
+		}
+		return VOID_TYPE
+
 	// --- Array literal ---
 	case *parser.ArrayLiteral:
 		// All elements must be same type
 		if len(node.Elements) == 0 {
-			return ARRAY_TYPE
+			return Type("ТІЗІМ_БЕЛГІСІЗ")
 		}
 		firstType := tc.Check(node.Elements[0], env)
 		for i, el := range node.Elements[1:] {
@@ -213,24 +398,30 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 				tc.errorf("тізім элементтерінің типтері сәйкес емес: %d индексте %s күтілді, бірақ %s табылды", i+1, firstType, t)
 			}
 		}
-		return ARRAY_TYPE
+		return Type("ТІЗІМ_" + string(firstType))
 
 	// --- Array index ---
 	case *parser.IndexExpression:
 		arrType := tc.Check(node.Left, env)
 		idxType := tc.Check(node.Index, env)
-		if arrType != ARRAY_TYPE && arrType != STRING_TYPE {
+		if !strings.HasPrefix(string(arrType), "ТІЗІМ") && arrType != STRING_TYPE {
 			tc.errorf("индекстеу тізім немесе мәтін типін талап етеді, бірақ %s берілді", arrType)
 		}
 		if idxType != NUMBER_TYPE && idxType != INT_TYPE {
 			tc.errorf("индекс сандық тип болуы керек, бірақ %s берілді", idxType)
 		}
-		return UNKNOWN // element type unknown without generics
+		if arrType == STRING_TYPE {
+			return STRING_TYPE
+		}
+		if strings.HasPrefix(string(arrType), "ТІЗІМ_") {
+			return Type(string(arrType)[len("ТІЗІМ_"):])
+		}
+		return UNKNOWN
 
 	// --- Length ---
 	case *parser.LengthExpression:
 		valType := tc.Check(node.Value, env)
-		if valType != ARRAY_TYPE && valType != STRING_TYPE {
+		if !strings.HasPrefix(string(valType), "ТІЗІМ") && valType != STRING_TYPE {
 			tc.errorf("'ұзындық' тізім немесе мәтін типін талап етеді, бірақ %s берілді", valType)
 		}
 		return NUMBER_TYPE
@@ -262,7 +453,11 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 			env.Set(node.Name.Value, valType)
 		} else {
 			if existingType != valType && valType != UNKNOWN {
-				tc.errorf("'%s' айнымалысының типін өзгертуге болмайды (%s -> %s)", node.Name.Value, existingType, valType)
+				if strings.HasPrefix(string(existingType), "ҚҰРЫЛЫМ_") && valType == INT_TYPE {
+					// Null pointer assignment allowed
+				} else {
+					tc.errorf("'%s' айнымалысының типін өзгертуге болмайды (%s -> %s)", node.Name.Value, existingType, valType)
+				}
 			}
 		}
 		return valType
@@ -287,8 +482,43 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 
 	// --- Call expression ---
 	case *parser.CallExpression:
+		if strings.Contains(node.Function, ".") {
+			parts := strings.Split(node.Function, ".")
+			if len(parts) == 2 {
+				varName := parts[0]
+				methodName := parts[1]
+				t, ok := env.Get(varName)
+				if ok && strings.HasPrefix(string(t), "ҚҰРЫЛЫМ_") {
+					structName := string(t)[len("ҚҰРЫЛЫМ_"):]
+					node.Arguments = append([]parser.Expression{&parser.Identifier{Value: varName}}, node.Arguments...)
+					node.Function = structName + "." + methodName
+				}
+			}
+		}
 		sig, ok := tc.funcs[node.Function]
 		if !ok {
+			// Check if it is a struct name (constructor)
+			if strDef, okStruct := tc.structs[node.Function]; okStruct {
+				if len(node.Arguments) != len(strDef.Fields) {
+					tc.errorf("'%s' құрылымын инициализациялау үшін %d аргумент қажет, бірақ %d берілді", node.Function, len(strDef.Fields), len(node.Arguments))
+				}
+				for i, arg := range node.Arguments {
+					argType := tc.Check(arg, env)
+					if i < len(strDef.Types) {
+						expectedType := tc.fieldTypeToType(strDef.Types[i])
+						if argType != expectedType && argType != UNKNOWN {
+							if expectedType == NUMBER_TYPE && argType == INT_TYPE {
+								// Promotion allowed
+							} else if strings.HasPrefix(string(expectedType), "ҚҰРЫЛЫМ_") && argType == INT_TYPE {
+								// Null pointer initializer allowed
+							} else {
+								tc.errorf("'%s' құрылымының '%s' өрісі %s типін күтеді, бірақ %s берілді", node.Function, strDef.Fields[i], expectedType, argType)
+							}
+						}
+					}
+				}
+				return Type("ҚҰРЫЛЫМ_" + node.Function)
+			}
 			tc.errorf("'%s' функциясы табылмады", node.Function)
 			return UNKNOWN
 		}
@@ -403,6 +633,12 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 	case *parser.FileWriteStatement:
 		return VOID_TYPE
 
+	case *parser.BreakStatement:
+		return VOID_TYPE
+
+	case *parser.ContinueStatement:
+		return VOID_TYPE
+
 	// --- Expression statement ---
 	case *parser.ExpressionStatement:
 		return tc.Check(node.Expression, env)
@@ -411,6 +647,22 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 	return UNKNOWN
 }
 
+func (tc *TypeChecker) fieldTypeToType(ft string) Type {
+	switch ft {
+	case "БҮТІН":
+		return INT_TYPE
+	case "САН":
+		return NUMBER_TYPE
+	case "МӘТІН":
+		return STRING_TYPE
+	case "АҚИҚАТ":
+		return BOOL_TYPE
+	case "БАЙТ":
+		return BYTE_TYPE
+	default:
+		return Type("ҚҰРЫЛЫМ_" + ft)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Function registration (first pass)
@@ -420,6 +672,12 @@ func (tc *TypeChecker) registerFunction(fs *parser.FunctionStatement, env *TypeE
 	paramTypes := make([]Type, len(fs.Parameters))
 	for i := range fs.Parameters {
 		paramTypes[i] = UNKNOWN // inferred later
+	}
+	if strings.Contains(fs.Name, ".") {
+		parts := strings.Split(fs.Name, ".")
+		if len(parts) == 2 && len(fs.Parameters) > 0 && fs.Parameters[0] == "өзі" {
+			paramTypes[0] = Type("ҚҰРЫЛЫМ_" + parts[0])
+		}
 	}
 	sig := &FuncSig{
 		Params:     fs.Parameters,

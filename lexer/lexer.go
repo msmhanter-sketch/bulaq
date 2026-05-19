@@ -19,11 +19,13 @@ const (
 	IDENTIFIER
 
 	// Keywords — Butaq SOV syntax
-	VAR    // болсын   (assign/declare)
-	IF     // егер     (if)
-	ELSE   // әйтпесе  (else)
-	WHILE  // әзірше   (while)
-	PRINT  // жазу     (print)
+	VAR      // болсын   (assign/declare)
+	IF       // егер     (if)
+	ELSE     // әйтпесе  (else)
+	WHILE    // әзірше   (while)
+	BREAK    // үзу
+	CONTINUE // жалғастыру
+	PRINT    // жазу     (print)
 
 	// Math Operations
 	PLUS  // қосу
@@ -55,19 +57,20 @@ const (
 	FUNC   // функция
 	RETURN // қайтару
 	CALL   // шақыру
+	IMPORT // енгізу
 
 	// Booleans
 	TRUE  // ақиқат
 	FALSE // жалған
 
 	// Arrays
-	ARRAY      // тізім
-	LBRACKET   // [
-	RBRACKET   // ]
-	INDEX_GET  // тізім_алу (array index get)
-	INDEX_SET  // тізім_қой (array index set)
-	ARRAY_LEN  // ұзындық
-	FREE        // бос (free heap memory)
+	ARRAY     // тізім
+	LBRACKET  // [
+	RBRACKET  // ]
+	INDEX_GET // тізім_алу (array index get)
+	INDEX_SET // тізім_қой (array index set)
+	ARRAY_LEN // ұзындық
+	FREE      // бос (free heap memory)
 
 	// Types
 	TYPE_INT    // БҮТІН
@@ -78,6 +81,7 @@ const (
 
 	// Structs
 	STRUCT // құрылым
+	NEW    // жасау
 
 	// String / char ops
 	CHAR_AT    // символ
@@ -104,11 +108,13 @@ type Token struct {
 
 var keywords = map[string]TokenType{
 	// Core
-	"болсын":   VAR,
-	"егер":     IF,
-	"әйтпесе":  ELSE,
-	"әзірше":   WHILE,
-	"жазу":     PRINT,
+	"болсын":     VAR,
+	"егер":       IF,
+	"әйтпесе":    ELSE,
+	"әзірше":     WHILE,
+	"үзу":        BREAK,
+	"жалғастыру": CONTINUE,
+	"жазу":       PRINT,
 
 	// Math
 	"қосу":    PLUS,
@@ -117,12 +123,12 @@ var keywords = map[string]TokenType{
 	"бөлу":    DIV,
 
 	// Comparisons
-	"үлкен":      GT,
-	"кіші":       LT,
-	"тең":        EQ,
-	"тең_емес":   NEQ,
-	"үлкен_тең":  GTE,
-	"кіші_тең":   LTE,
+	"үлкен":     GT,
+	"кіші":      LT,
+	"тең":       EQ,
+	"тең_емес":  NEQ,
+	"үлкен_тең": GTE,
+	"кіші_тең":  LTE,
 
 	// Logic
 	"және":   AND,
@@ -130,20 +136,20 @@ var keywords = map[string]TokenType{
 	"емес":   NOT,
 
 	// Functions
-	"функция":  FUNC,
-	"қайтару":  RETURN,
-	"шақыру":   CALL,
+	"функция": FUNC,
+	"қайтару": RETURN,
+	"шақыру":  CALL,
 
 	// Booleans
 	"ақиқат": TRUE,
-	"жалған":  FALSE,
+	"жалған": FALSE,
 
 	// Arrays
 	"тізім":     ARRAY,
 	"ұзындық":   ARRAY_LEN,
 	"тізім_алу": INDEX_GET,
 	"тізім_қой": INDEX_SET,
-	"бос":        FREE,
+	"бос":       FREE,
 
 	// Types
 	"БҮТІН":  TYPE_INT,
@@ -154,14 +160,15 @@ var keywords = map[string]TokenType{
 
 	// Structs
 	"құрылым": STRUCT,
+	"жасау":   NEW,
 
 	// String / char ops
-	"символ":       CHAR_AT,
-	"біріктіру":    STR_CONCAT,
-	"ұзындық_жол":  STR_LEN,
-	"мәтін_тең":    STR_EQ,
-	"санды_мәтін":  TO_STR,
-	"таңба_коды":   CHAR_CODE,
+	"символ":      CHAR_AT,
+	"біріктіру":   STR_CONCAT,
+	"ұзындық_жол": STR_LEN,
+	"мәтін_тең":   STR_EQ,
+	"санды_мәтін": TO_STR,
+	"таңба_коды":  CHAR_CODE,
 
 	// File I/O
 	"файл_оқу":  FILE_READ,
@@ -169,6 +176,9 @@ var keywords = map[string]TokenType{
 
 	// User Input
 	"кіру": INPUT,
+
+	// Imports
+	"енгізу": IMPORT,
 }
 
 type Lexer struct {
@@ -254,7 +264,7 @@ func (l *Lexer) NextToken() Token {
 			}
 			tok.Literal = num
 			return tok
-		} else if isLetter(l.ch) {
+		} else if isLetter(l.ch) || l.ch == '.' {
 			tok.Line = l.line
 			tok.Col = l.col
 			tok.Literal = l.readIdentifier()
@@ -291,7 +301,7 @@ func (l *Lexer) skipComment() {
 
 func (l *Lexer) readIdentifier() string {
 	startPos := l.position
-	for isLetter(l.ch) || isDigit(l.ch) || l.ch == '_' {
+	for isLetter(l.ch) || isDigit(l.ch) || l.ch == '_' || l.ch == '.' {
 		l.readChar()
 	}
 	return l.input[startPos:l.position]

@@ -143,6 +143,37 @@ func (ce *CallExpression) String() string {
 	return out.String()
 }
 
+// Struct definition: құрылым Адам { аты жасы }
+type StructStatement struct {
+	Name   string
+	Fields []string
+	Types  []string
+}
+
+func (ss *StructStatement) statementNode()       {}
+func (ss *StructStatement) TokenLiteral() string { return "құрылым" }
+func (ss *StructStatement) String() string       { return "struct " + ss.Name }
+
+// Struct instantiation: Адам жасау
+type StructCreateExpression struct {
+	StructName string
+}
+
+func (sc *StructCreateExpression) expressionNode()      {}
+func (sc *StructCreateExpression) TokenLiteral() string { return "жасау" }
+func (sc *StructCreateExpression) String() string       { return "new " + sc.StructName }
+
+// Struct field access: adam.аты
+type StructFieldAccessExpression struct {
+	StructName string
+	Field      string
+	Target     Expression
+}
+
+func (sa *StructFieldAccessExpression) expressionNode()      {}
+func (sa *StructFieldAccessExpression) TokenLiteral() string { return "өріс_алу" }
+func (sa *StructFieldAccessExpression) String() string       { return sa.StructName + "." + sa.Field }
+
 // Array literal: тізім [1 2 3] болсын
 type ArrayLiteral struct {
 	Elements []Expression
@@ -243,7 +274,6 @@ func (cc *CharCodeExpression) expressionNode()      {}
 func (cc *CharCodeExpression) TokenLiteral() string { return "таңба_коды" }
 func (cc *CharCodeExpression) String() string       { return "charcode(" + cc.Value.String() + ")" }
 
-
 // File read: "path" файл_оқу  → returns string with file contents
 type FileReadExpression struct {
 	Path Expression
@@ -286,6 +316,20 @@ func (vs *VarAssignStatement) statementNode()       {}
 func (vs *VarAssignStatement) TokenLiteral() string { return "болсын" }
 func (vs *VarAssignStatement) String() string {
 	return vs.Name.String() + " " + vs.Value.String() + " болсын"
+}
+
+// adam.аты "Али" болсын
+type StructFieldAssignStatement struct {
+	StructName string
+	Field      string
+	Value      Expression
+	Target     Expression
+}
+
+func (sf *StructFieldAssignStatement) statementNode()       {}
+func (sf *StructFieldAssignStatement) TokenLiteral() string { return "болсын" }
+func (sf *StructFieldAssignStatement) String() string {
+	return sf.StructName + "." + sf.Field + " = " + sf.Value.String()
 }
 
 // arr 0 10 тізім_қой  (array[index] = value)
@@ -392,3 +436,26 @@ func (es *ExpressionStatement) String() string {
 	}
 	return ""
 }
+
+// Break statement: үзу
+type BreakStatement struct{}
+
+func (bs *BreakStatement) statementNode()       {}
+func (bs *BreakStatement) TokenLiteral() string { return "үзу" }
+func (bs *BreakStatement) String() string       { return "үзу" }
+
+// Continue statement: жалғастыру
+type ContinueStatement struct{}
+
+func (cs *ContinueStatement) statementNode()       {}
+func (cs *ContinueStatement) TokenLiteral() string { return "жалғастыру" }
+func (cs *ContinueStatement) String() string       { return "жалғастыру" }
+
+// Import statement: "path" енгізу
+type ImportStatement struct {
+	Path string
+}
+
+func (is *ImportStatement) statementNode()       {}
+func (is *ImportStatement) TokenLiteral() string { return "енгізу" }
+func (is *ImportStatement) String() string       { return "\"" + is.Path + "\" енгізу" }

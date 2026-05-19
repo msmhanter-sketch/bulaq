@@ -29,30 +29,37 @@ type CppGenerator struct { // kept name for backward compat with main.go
 	platform Platform
 
 	// Assembly sections
-	dataSec  strings.Builder // .data section
-	bssSec   strings.Builder // .bss section
-	textSec  strings.Builder // .text section
-	funcSec  strings.Builder // function bodies
+	dataSec strings.Builder // .data section
+	bssSec  strings.Builder // .bss section
+	textSec strings.Builder // .text section
+	funcSec strings.Builder // function bodies
 
 	// Counters for unique label generation
-	labelCount  int
-	strCount    int
-	floatCount  int
+	labelCount int
+	strCount   int
+	floatCount int
 
 	// Variable stack frame offsets: varName -> rbp offset (negative)
-	varOffsets   map[string]int
+	varOffsets    map[string]int
 	currentOffset int // grows downward (e.g. -8, -16, ...)
 
 	// Variable type tracking: true = string/ptr, false = float/number
 	varIsString map[string]bool
 
 	// Function context
-	currentFunc   string
-	funcParams    map[string][]string // funcName -> param names
-	funcParamOff  map[string]map[string]int // funcName -> paramName -> rbp offset
+	currentFunc  string
+	funcParams   map[string][]string       // funcName -> param names
+	funcParamOff map[string]map[string]int // funcName -> paramName -> rbp offset
 
 	// Known functions from typechecker
 	funcs map[string]*typechecker.FuncSig
+
+	// Known structs from typechecker
+	structs map[string]*parser.StructStatement
+
+	// Loop label stacks for break and continue
+	loopStartLabels []string
+	loopEndLabels   []string
 }
 
 func New(env *typechecker.TypeEnv) *CppGenerator {
@@ -71,8 +78,10 @@ func NewWithTC(env *typechecker.TypeEnv, tc *typechecker.TypeChecker, platform P
 	}
 	if tc != nil {
 		cg.funcs = tc.GetFuncs()
+		cg.structs = tc.GetStructs()
 	} else {
 		cg.funcs = make(map[string]*typechecker.FuncSig)
+		cg.structs = make(map[string]*parser.StructStatement)
 	}
 	return cg
 }
@@ -107,6 +116,7 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		cg.textSec.WriteString("    extern ftell\n")
 		cg.textSec.WriteString("    extern fflush\n")
 		cg.textSec.WriteString("    extern scanf\n")
+		cg.textSec.WriteString("    extern rand\n")
 		cg.textSec.WriteString("    extern SetConsoleOutputCP\n")
 		cg.textSec.WriteString("    extern ExitProcess\n\n")
 	}
@@ -120,9 +130,12 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 	cg.dataSec.WriteString("    file_r    db \"r\", 0\n")
 	cg.dataSec.WriteString("    file_w    db \"w\", 0\n")
 	cg.dataSec.WriteString("    newline   db 10, 0\n")
+	cg.dataSec.WriteString("    err_null  db \"Қате: бос сілтемеге (null) жүгіну!\", 0\n")
+	cg.dataSec.WriteString("    err_div0  db \"Қате: нөлге бөлуге болмайды!\", 0\n")
+	cg.dataSec.WriteString("    err_bounds db \"Қате: жиын/тізім шекарасынан шығу!\", 0\n")
 	// Static 64KB scratch buffer for string concat / file read
 	cg.bssSec.WriteString("    scratch_buf resb 65536\n")
-	cg.bssSec.WriteString("    input_buf   resb 4096\n")  // кіру: stdin line buffer
+	cg.bssSec.WriteString("    input_buf   resb 4096\n") // кіру: stdin line buffer
 	cg.bssSec.WriteString("    numstr_buf  resb 64\n")
 	cg.bssSec.WriteString("    char_buf    resb 4\n") // 1-char string for символ
 
@@ -157,7 +170,7 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 	if stackSize > 0 {
 		cg.textSec.WriteString(fmt.Sprintf("    sub rsp, %d\n", stackSize))
 	}
-	
+
 	for _, stmt := range mainStmts {
 		cg.genStatement(stmt, &cg.textSec)
 	}
@@ -201,7 +214,71 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		out.WriteString("    extern fwrite\n")
 		out.WriteString("    extern fseek\n")
 		out.WriteString("    extern ftell\n")
+		out.WriteString("    extern rand\n")
 		out.WriteString("    extern scanf\n\n")
+	}
+
+	// Generate runtime error helpers
+	cg.funcSec.WriteString("\n; --- Runtime error handlers ---\n")
+
+	// 1. Null pointer error
+	cg.funcSec.WriteString("_runtime_null_pointer_error:\n")
+	if cg.platform == PlatformLinux {
+		cg.funcSec.WriteString("    lea rsi, [err_null]\n")
+		cg.funcSec.WriteString("    lea rdi, [fmt_str]\n")
+		cg.funcSec.WriteString("    xor rax, rax\n")
+		cg.funcSec.WriteString("    call printf\n")
+		cg.funcSec.WriteString("    mov rax, 60\n")
+		cg.funcSec.WriteString("    mov rdi, 1\n")
+		cg.funcSec.WriteString("    syscall\n")
+	} else {
+		cg.funcSec.WriteString("    lea rdx, [err_null]\n")
+		cg.funcSec.WriteString("    lea rcx, [fmt_str]\n")
+		cg.funcSec.WriteString("    sub rsp, 32\n")
+		cg.funcSec.WriteString("    call printf\n")
+		cg.funcSec.WriteString("    add rsp, 32\n")
+		cg.funcSec.WriteString("    mov rcx, 1\n")
+		cg.funcSec.WriteString("    call ExitProcess\n")
+	}
+
+	// 2. Division by zero error
+	cg.funcSec.WriteString("_runtime_divide_by_zero_error:\n")
+	if cg.platform == PlatformLinux {
+		cg.funcSec.WriteString("    lea rsi, [err_div0]\n")
+		cg.funcSec.WriteString("    lea rdi, [fmt_str]\n")
+		cg.funcSec.WriteString("    xor rax, rax\n")
+		cg.funcSec.WriteString("    call printf\n")
+		cg.funcSec.WriteString("    mov rax, 60\n")
+		cg.funcSec.WriteString("    mov rdi, 1\n")
+		cg.funcSec.WriteString("    syscall\n")
+	} else {
+		cg.funcSec.WriteString("    lea rdx, [err_div0]\n")
+		cg.funcSec.WriteString("    lea rcx, [fmt_str]\n")
+		cg.funcSec.WriteString("    sub rsp, 32\n")
+		cg.funcSec.WriteString("    call printf\n")
+		cg.funcSec.WriteString("    add rsp, 32\n")
+		cg.funcSec.WriteString("    mov rcx, 1\n")
+		cg.funcSec.WriteString("    call ExitProcess\n")
+	}
+
+	// 3. Array bounds error
+	cg.funcSec.WriteString("_runtime_array_bounds_error:\n")
+	if cg.platform == PlatformLinux {
+		cg.funcSec.WriteString("    lea rsi, [err_bounds]\n")
+		cg.funcSec.WriteString("    lea rdi, [fmt_str]\n")
+		cg.funcSec.WriteString("    xor rax, rax\n")
+		cg.funcSec.WriteString("    call printf\n")
+		cg.funcSec.WriteString("    mov rax, 60\n")
+		cg.funcSec.WriteString("    mov rdi, 1\n")
+		cg.funcSec.WriteString("    syscall\n")
+	} else {
+		cg.funcSec.WriteString("    lea rdx, [err_bounds]\n")
+		cg.funcSec.WriteString("    lea rcx, [fmt_str]\n")
+		cg.funcSec.WriteString("    sub rsp, 32\n")
+		cg.funcSec.WriteString("    call printf\n")
+		cg.funcSec.WriteString("    add rsp, 32\n")
+		cg.funcSec.WriteString("    mov rcx, 1\n")
+		cg.funcSec.WriteString("    call ExitProcess\n")
 	}
 
 	out.WriteString(cg.dataSec.String())
@@ -314,6 +391,22 @@ func (cg *CppGenerator) genStatement(node parser.Statement, sec *strings.Builder
 	case *parser.WhileStatement:
 		cg.genWhile(n, sec)
 
+	case *parser.BreakStatement:
+		if len(cg.loopEndLabels) > 0 {
+			target := cg.loopEndLabels[len(cg.loopEndLabels)-1]
+			sec.WriteString(fmt.Sprintf("    jmp %s\n", target))
+		} else {
+			sec.WriteString("    ; ERROR: үзу сыртта қолданылды\n")
+		}
+
+	case *parser.ContinueStatement:
+		if len(cg.loopStartLabels) > 0 {
+			target := cg.loopStartLabels[len(cg.loopStartLabels)-1]
+			sec.WriteString(fmt.Sprintf("    jmp %s\n", target))
+		} else {
+			sec.WriteString("    ; ERROR: жалғастыру сыртта қолданылды\n")
+		}
+
 	case *parser.ReturnStatement:
 		cg.genExpression(n.Value, sec)
 		if cg.isStringExpr(n.Value) {
@@ -334,15 +427,32 @@ func (cg *CppGenerator) genStatement(node parser.Statement, sec *strings.Builder
 			return
 		}
 		sec.WriteString(fmt.Sprintf("    mov r12, [rbp%+d]\n", off)) // r12 = array ptr
+		sec.WriteString("    cmp r12, 0\n")
+		sec.WriteString("    je _runtime_null_pointer_error\n")
 		// Evaluate index into r13 (int)
 		cg.genExpression(n.Index, sec)
 		sec.WriteString("    cvttsd2si r13, xmm0\n") // r13 = int index
-		sec.WriteString("    imul r13, 8\n")          // byte offset
-		sec.WriteString("    add r13, 8\n")           // skip 8-byte length prefix
-		// Evaluate value into xmm0
+		// Check bounds
+		sec.WriteString("    cmp r13, 0\n")
+		sec.WriteString("    jl _runtime_array_bounds_error\n")
+		sec.WriteString("    cmp r13, [r12]\n")
+		sec.WriteString("    jge _runtime_array_bounds_error\n")
+
+		sec.WriteString("    imul r13, 8\n")         // byte offset
+		sec.WriteString("    add r13, 8\n")          // skip 8-byte length prefix
+		// Evaluate value
+		sec.WriteString("    push r12\n")
+		sec.WriteString("    push r13\n")
 		cg.genExpression(n.Value, sec)
-		// Store xmm0 at array[index]
-		sec.WriteString("    movsd [r12 + r13], xmm0\n")
+		sec.WriteString("    pop r13\n")
+		sec.WriteString("    pop r12\n")
+		// Store at array[index] based on type
+		valType := cg.tc.Check(n.Value, cg.env)
+		if valType == typechecker.STRING_TYPE || valType == typechecker.ARRAY_TYPE || strings.HasPrefix(string(valType), "ҚҰРЫЛЫМ_") {
+			sec.WriteString("    mov [r12 + r13], rax\n")
+		} else {
+			sec.WriteString("    movsd [r12 + r13], xmm0\n")
+		}
 
 	case *parser.FreeStatement:
 		// val бос  — free(ptr)
@@ -364,6 +474,80 @@ func (cg *CppGenerator) genStatement(node parser.Statement, sec *strings.Builder
 	case *parser.FileWriteStatement:
 		cg.genFileWrite(n, sec)
 
+	case *parser.StructStatement:
+		// Declarations only, no runtime code
+
+	case *parser.StructFieldAssignStatement:
+		var structName string
+		parts := strings.Split(n.Field, ".")
+		if n.Target != nil {
+			sec.WriteString(fmt.Sprintf("    ; %s болсын (nested)\n", n.Field))
+			cg.genExpression(n.Target, sec)
+			sec.WriteString("    push rax\n")
+			cg.genExpression(n.Value, sec)
+			sec.WriteString("    pop r12\n")
+			targetType := cg.tc.Check(n.Target, cg.env)
+			structName = string(targetType)[len("ҚҰРЫЛЫМ_"):]
+		} else {
+			sec.WriteString(fmt.Sprintf("    ; %s.%s болсын\n", n.StructName, n.Field))
+			off, ok := cg.getVarOffset(n.StructName)
+			if !ok {
+				sec.WriteString(fmt.Sprintf("    ; ERROR: undeclared struct '%s'\n", n.StructName))
+				return
+			}
+			t, ok := cg.env.Get(n.StructName)
+			if !ok || !strings.HasPrefix(string(t), "ҚҰРЫЛЫМ_") {
+				sec.WriteString(fmt.Sprintf("    ; ERROR: '%s' is not a struct\n", n.StructName))
+				return
+			}
+			structName = string(t)[len("ҚҰРЫЛЫМ_"):]
+
+			// Evaluate value
+			cg.genExpression(n.Value, sec)
+			sec.WriteString(fmt.Sprintf("    mov r12, [rbp%+d]\n", off))
+		}
+		sec.WriteString("    cmp r12, 0\n")
+		sec.WriteString("    je _runtime_null_pointer_error\n")
+
+		currentStructType := structName
+		for i, part := range parts {
+			structDef, ok := cg.structs[currentStructType]
+			if !ok {
+				sec.WriteString(fmt.Sprintf("    ; ERROR: struct definition '%s' not found\n", currentStructType))
+				return
+			}
+			fieldIdx := -1
+			for idx, f := range structDef.Fields {
+				if f == part {
+					fieldIdx = idx
+					break
+				}
+			}
+			if fieldIdx == -1 {
+				sec.WriteString(fmt.Sprintf("    ; ERROR: field '%s' not found in struct '%s'\n", part, currentStructType))
+				return
+			}
+			fieldOffset := fieldIdx * 8
+
+			if i < len(parts)-1 {
+				sec.WriteString(fmt.Sprintf("    mov r12, [r12 + %d]\n", fieldOffset))
+				sec.WriteString("    cmp r12, 0\n")
+				sec.WriteString("    je _runtime_null_pointer_error\n")
+				currentStructType = structDef.Types[fieldIdx]
+			} else {
+				if cg.isStringExpr(n.Value) {
+					sec.WriteString(fmt.Sprintf("    mov [r12 + %d], rax\n", fieldOffset))
+				} else {
+					valType := cg.tc.Check(n.Value, cg.env)
+					if valType == typechecker.STRING_TYPE || valType == typechecker.ARRAY_TYPE || strings.HasPrefix(string(valType), "ҚҰРЫЛЫМ_") {
+						sec.WriteString(fmt.Sprintf("    mov [r12 + %d], rax\n", fieldOffset))
+					} else {
+						sec.WriteString(fmt.Sprintf("    movsd [r12 + %d], xmm0\n", fieldOffset))
+					}
+				}
+			}
+		}
+
 	case *parser.FunctionStatement:
 		// Nested function — already handled in top-level pass, skip here
 
@@ -380,48 +564,51 @@ func (cg *CppGenerator) genVarAssign(n *parser.VarAssignStatement, sec *strings.
 	sec.WriteString(fmt.Sprintf("    ; %s болсын\n", n.Name.Value))
 	cg.genExpression(n.Value, sec)
 	off := cg.allocVar(n.Name.Value)
-	// Strings and bools live in rax; numbers/floats in xmm0.
-	// Use the expression type to decide which register to save.
-	switch n.Value.(type) {
-	case *parser.StringLiteral, *parser.StrConcatExpression,
-		*parser.StrEqExpression,
-		*parser.ToStrExpression, *parser.CharAtExpression,
-		*parser.BoolLiteral,
-		*parser.FileReadExpression,
-		*parser.ArrayLiteral:
-		// String/bool/array: result in rax (pointer or boolean)
+
+	exprType := cg.tc.Check(n.Value, cg.env)
+	existingType, ok := cg.env.Get(n.Name.Value)
+	if !ok {
+		cg.env.Set(n.Name.Value, exprType)
+		existingType = exprType
+	}
+
+	// Strings, bools, arrays and structs live in rax (pointers or bools); numbers/floats in xmm0.
+	// We use the existing declared variable type to decide which register to save.
+	if existingType == typechecker.STRING_TYPE || existingType == typechecker.ARRAY_TYPE || strings.HasPrefix(string(existingType), "ҚҰРЫЛЫМ_") {
 		sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
 		cg.varIsString[n.Name.Value] = true
-	case *parser.NumberLiteral, *parser.PostfixExpression, *parser.CharCodeExpression,
-		*parser.StrLenExpression, *parser.LengthExpression:
-		// Numeric: result in xmm0 only
-		sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
-		cg.varIsString[n.Name.Value] = false
-	default:
-		// Identifier, call expression, or other — derive type from typechecker.
-		var exprType typechecker.Type
-
-		// For call expressions, look up the function's inferred return type directly.
-		if call, ok := n.Value.(*parser.CallExpression); ok {
-			if sig, found := cg.funcs[call.Function]; found && sig.ReturnType != typechecker.UNKNOWN {
-				exprType = sig.ReturnType
-			} else {
-				exprType = cg.tc.Check(n.Value, cg.env)
-			}
-		} else {
-			exprType = cg.tc.Check(n.Value, cg.env)
-		}
-
-		if exprType == typechecker.STRING_TYPE || exprType == typechecker.ARRAY_TYPE || cg.isStringExpr(n.Value) {
+	} else if existingType == typechecker.NUMBER_TYPE || existingType == typechecker.INT_TYPE || existingType == typechecker.BOOL_TYPE {
+		// Bool, int or float
+		if existingType == typechecker.BOOL_TYPE {
 			sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
 			cg.varIsString[n.Name.Value] = true
-		} else if exprType == typechecker.NUMBER_TYPE || exprType == typechecker.INT_TYPE {
-			sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
-			cg.varIsString[n.Name.Value] = false
 		} else {
-			// Still unknown — store xmm0 as numeric default.
 			sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
 			cg.varIsString[n.Name.Value] = false
+		}
+	} else {
+		// Fallback switch on value expression type
+		switch n.Value.(type) {
+		case *parser.StringLiteral, *parser.StrConcatExpression,
+			*parser.StrEqExpression,
+			*parser.ToStrExpression, *parser.CharAtExpression,
+			*parser.BoolLiteral,
+			*parser.FileReadExpression,
+			*parser.ArrayLiteral:
+			sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
+			cg.varIsString[n.Name.Value] = true
+		case *parser.NumberLiteral, *parser.PostfixExpression, *parser.CharCodeExpression,
+			*parser.StrLenExpression, *parser.LengthExpression:
+			sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
+			cg.varIsString[n.Name.Value] = false
+		default:
+			if exprType == typechecker.STRING_TYPE || exprType == typechecker.ARRAY_TYPE || strings.HasPrefix(string(exprType), "ҚҰРЫЛЫМ_") || cg.isStringExpr(n.Value) {
+				sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
+				cg.varIsString[n.Name.Value] = true
+			} else {
+				sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
+				cg.varIsString[n.Name.Value] = false
+			}
 		}
 	}
 }
@@ -439,9 +626,35 @@ func (cg *CppGenerator) isStringExpr(e parser.Expression) bool {
 	case *parser.Identifier:
 		return cg.varIsString[val.Value]
 	case *parser.CallExpression:
-		// Check if the function's inferred return type is string
 		if sig, ok := cg.funcs[val.Function]; ok {
-			return sig.ReturnType == typechecker.STRING_TYPE
+			return sig.ReturnType == typechecker.STRING_TYPE || sig.ReturnType == typechecker.ARRAY_TYPE || strings.HasPrefix(string(sig.ReturnType), "ҚҰРЫЛЫМ_")
+		}
+	case *parser.StructFieldAccessExpression:
+		t, ok := cg.env.Get(val.StructName)
+		if ok && strings.HasPrefix(string(t), "ҚҰРЫЛЫМ_") {
+			structName := string(t)[len("ҚҰРЫЛЫМ_"):]
+			parts := strings.Split(val.Field, ".")
+			currentStructType := structName
+			var lastFieldType string
+			for _, part := range parts {
+				structDef, okDef := cg.structs[currentStructType]
+				if !okDef {
+					return false
+				}
+				fieldIdx := -1
+				for idx, f := range structDef.Fields {
+					if f == part {
+						fieldIdx = idx
+						break
+					}
+				}
+				if fieldIdx == -1 {
+					return false
+				}
+				lastFieldType = structDef.Types[fieldIdx]
+				currentStructType = lastFieldType
+			}
+			return lastFieldType == "МӘТІН" || lastFieldType == "ТІЗІМ" || (lastFieldType != "САН" && lastFieldType != "БҮТІН" && lastFieldType != "АҚИҚАТ" && lastFieldType != "БАЙТ")
 		}
 	}
 	return false
@@ -536,6 +749,21 @@ func (cg *CppGenerator) genPrint(n *parser.PrintStatement, sec *strings.Builder)
 			}
 		}
 
+	case *parser.StructFieldAccessExpression:
+		cg.genExpression(val, sec)
+		if cg.platform == PlatformLinux {
+			sec.WriteString("    mov rdi, fmt_float\n")
+			sec.WriteString("    mov rax, 1\n")
+			sec.WriteString("    call printf\n")
+		} else {
+			sec.WriteString("    movsd xmm1, xmm0\n")
+			sec.WriteString("    movq rdx, xmm1\n")
+			sec.WriteString("    lea rcx, [fmt_float]\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call printf\n")
+			sec.WriteString("    add rsp, 32\n")
+		}
+
 	default:
 		// General expression — eval into xmm0/rax and print as number
 		cg.genExpression(n.Value, sec)
@@ -598,6 +826,9 @@ func (cg *CppGenerator) genWhile(n *parser.WhileStatement, sec *strings.Builder)
 	startLabel := cg.newLabel("while")
 	endLabel := cg.newLabel("endwhile")
 
+	cg.loopStartLabels = append(cg.loopStartLabels, startLabel)
+	cg.loopEndLabels = append(cg.loopEndLabels, endLabel)
+
 	sec.WriteString("    ; әзірше\n")
 	sec.WriteString(startLabel + ":\n")
 	cg.genCondition(n.Condition, sec, endLabel)
@@ -608,6 +839,9 @@ func (cg *CppGenerator) genWhile(n *parser.WhileStatement, sec *strings.Builder)
 
 	sec.WriteString(fmt.Sprintf("    jmp %s\n", startLabel))
 	sec.WriteString(endLabel + ":\n")
+
+	cg.loopStartLabels = cg.loopStartLabels[:len(cg.loopStartLabels)-1]
+	cg.loopEndLabels = cg.loopEndLabels[:len(cg.loopEndLabels)-1]
 }
 
 // ---------------------------------------------------------------------------
@@ -633,17 +867,17 @@ func (cg *CppGenerator) genCondition(cond parser.Expression, sec *strings.Builde
 	sec.WriteString("    comisd xmm1, xmm0\n")
 
 	switch pe.Operator {
-	case "үлкен":    // xmm1 > xmm0: jump to fail if <=
+	case "үлкен": // xmm1 > xmm0: jump to fail if <=
 		sec.WriteString(fmt.Sprintf("    jbe %s\n", failLabel))
-	case "кіші":     // xmm1 < xmm0: jump to fail if >=
+	case "кіші": // xmm1 < xmm0: jump to fail if >=
 		sec.WriteString(fmt.Sprintf("    jae %s\n", failLabel))
-	case "тең":      // xmm1 == xmm0: jump to fail if !=
+	case "тең": // xmm1 == xmm0: jump to fail if !=
 		sec.WriteString(fmt.Sprintf("    jne %s\n", failLabel))
 	case "тең_емес": // xmm1 != xmm0: jump to fail if ==
 		sec.WriteString(fmt.Sprintf("    je %s\n", failLabel))
 	case "үлкен_тең": // xmm1 >= xmm0: jump to fail if <
 		sec.WriteString(fmt.Sprintf("    jb %s\n", failLabel))
-	case "кіші_тең":  // xmm1 <= xmm0: jump to fail if >
+	case "кіші_тең": // xmm1 <= xmm0: jump to fail if >
 		sec.WriteString(fmt.Sprintf("    ja %s\n", failLabel))
 	default:
 		// AND/OR: evaluate as bool
@@ -669,6 +903,86 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		// Temporary compatibility shim: evaluate into xmm0 as float for math ops.
 		sec.WriteString(fmt.Sprintf("    mov rax, %d\n", n.Value))
 		sec.WriteString("    cvtsi2sd xmm0, rax\n")
+
+	case *parser.StructCreateExpression:
+		structDef, ok := cg.structs[n.StructName]
+		if !ok {
+			sec.WriteString(fmt.Sprintf("    ; ERROR: struct definition '%s' not found\n", n.StructName))
+			return
+		}
+		numFields := len(structDef.Fields)
+		size := numFields * 8
+		if size == 0 {
+			size = 8
+		}
+		sec.WriteString(fmt.Sprintf("    ; жасау %s\n", n.StructName))
+		if cg.platform == PlatformWindows {
+			sec.WriteString(fmt.Sprintf("    mov rcx, %d\n", size))
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call malloc\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString(fmt.Sprintf("    mov rdi, %d\n", size))
+			sec.WriteString("    call malloc\n")
+		}
+
+	case *parser.StructFieldAccessExpression:
+		var structName string
+		if n.Target != nil {
+			sec.WriteString(fmt.Sprintf("    ; %s оқу (nested)\n", n.Field))
+			cg.genExpression(n.Target, sec)
+			sec.WriteString("    mov r12, rax\n")
+			targetType := cg.tc.Check(n.Target, cg.env)
+			structName = string(targetType)[len("ҚҰРЫЛЫМ_"):]
+		} else {
+			sec.WriteString(fmt.Sprintf("    ; %s.%s оқу\n", n.StructName, n.Field))
+			off, ok := cg.getVarOffset(n.StructName)
+			if !ok {
+				sec.WriteString(fmt.Sprintf("    ; ERROR: undeclared struct '%s'\n", n.StructName))
+				return
+			}
+			t, ok := cg.env.Get(n.StructName)
+			if !ok || !strings.HasPrefix(string(t), "ҚҰРЫЛЫМ_") {
+				sec.WriteString(fmt.Sprintf("    ; ERROR: '%s' is not a struct\n", n.StructName))
+				return
+			}
+			structName = string(t)[len("ҚҰРЫЛЫМ_"):]
+			sec.WriteString(fmt.Sprintf("    mov r12, [rbp%+d]\n", off))
+		}
+		parts := strings.Split(n.Field, ".")
+		sec.WriteString("    cmp r12, 0\n")
+		sec.WriteString("    je _runtime_null_pointer_error\n")
+
+		currentStructType := structName
+		for i, part := range parts {
+			structDef, ok := cg.structs[currentStructType]
+			if !ok {
+				sec.WriteString(fmt.Sprintf("    ; ERROR: struct definition '%s' not found\n", currentStructType))
+				return
+			}
+			fieldIdx := -1
+			for idx, f := range structDef.Fields {
+				if f == part {
+					fieldIdx = idx
+					break
+				}
+			}
+			if fieldIdx == -1 {
+				sec.WriteString(fmt.Sprintf("    ; ERROR: field '%s' not found in struct '%s'\n", part, currentStructType))
+				return
+			}
+			fieldOffset := fieldIdx * 8
+
+			if i < len(parts)-1 {
+				sec.WriteString(fmt.Sprintf("    mov r12, [r12 + %d]\n", fieldOffset))
+				sec.WriteString("    cmp r12, 0\n")
+				sec.WriteString("    je _runtime_null_pointer_error\n")
+				currentStructType = structDef.Types[fieldIdx]
+			} else {
+				sec.WriteString(fmt.Sprintf("    mov rax, [r12 + %d]\n", fieldOffset))
+				sec.WriteString(fmt.Sprintf("    movsd xmm0, [r12 + %d]\n", fieldOffset))
+			}
+		}
 
 	case *parser.StringLiteral:
 		label := cg.newStr(n.Value)
@@ -827,7 +1141,7 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		cg.genExpression(n.Value, sec)
 		if cg.platform == PlatformWindows {
 			// xmm0 = float value; Win64 vararg: float must go in BOTH xmm AND int reg
-			sec.WriteString("    movsd xmm2, xmm0\n")     // xmm2 = 3rd arg (the float)
+			sec.WriteString("    movsd xmm2, xmm0\n")      // xmm2 = 3rd arg (the float)
 			sec.WriteString("    movq r8, xmm2\n")         // r8   = 3rd arg (int shadow)
 			sec.WriteString("    lea rdx, [fmt_numstr]\n") // rdx  = 2nd arg (format)
 			sec.WriteString("    lea rcx, [numstr_buf]\n") // rcx  = 1st arg (buffer)
@@ -910,7 +1224,7 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		nElems := len(n.Elements)
 		allocSize := (nElems * 8) + 8
 		sec.WriteString(fmt.Sprintf("    ; тізім — %d элемент, malloc(%d)\n", nElems, allocSize))
-		
+
 		if cg.platform == PlatformWindows {
 			sec.WriteString(fmt.Sprintf("    mov rcx, %d\n", allocSize))
 			// Windows stack align shadow space
@@ -924,12 +1238,18 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		sec.WriteString("    mov r12, rax\n") // r12 = array base
 		// Store length
 		sec.WriteString(fmt.Sprintf("    mov qword [r12], %d\n", nElems))
-		
+
 		// Fill each element
 		for i, elem := range n.Elements {
+			sec.WriteString("    push r12\n")
 			cg.genExpression(elem, sec)
-			// result in xmm0
-			sec.WriteString(fmt.Sprintf("    movsd [r12 + %d], xmm0\n", 8 + i*8))
+			sec.WriteString("    pop r12\n")
+			t := cg.tc.Check(elem, cg.env)
+			if t == typechecker.STRING_TYPE || t == typechecker.ARRAY_TYPE || strings.HasPrefix(string(t), "ҚҰРЫЛЫМ_") {
+				sec.WriteString(fmt.Sprintf("    mov [r12 + %d], rax\n", 8+i*8))
+			} else {
+				sec.WriteString(fmt.Sprintf("    movsd [r12 + %d], xmm0\n", 8+i*8))
+			}
 		}
 		sec.WriteString("    mov rax, r12\n") // return pointer
 
@@ -937,11 +1257,21 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		// arr idx алу — load float element at index
 		cg.genExpression(n.Left, sec)
 		sec.WriteString("    mov r12, rax\n") // r12 = array base pointer
+		sec.WriteString("    cmp r12, 0\n")
+		sec.WriteString("    je _runtime_null_pointer_error\n")
+		sec.WriteString("    push r12\n")
 		cg.genExpression(n.Index, sec)
+		sec.WriteString("    pop r12\n")
 		// xmm0 = index as float
 		sec.WriteString("    cvttsd2si r13, xmm0\n") // r13 = int index
-		sec.WriteString("    imul r13, 8\n")          // byte offset = index * 8
-		sec.WriteString("    add r13, 8\n")           // skip 8-byte length prefix
+		// Check bounds
+		sec.WriteString("    cmp r13, 0\n")
+		sec.WriteString("    jl _runtime_array_bounds_error\n")
+		sec.WriteString("    cmp r13, [r12]\n")
+		sec.WriteString("    jge _runtime_array_bounds_error\n")
+
+		sec.WriteString("    imul r13, 8\n")         // byte offset = index * 8
+		sec.WriteString("    add r13, 8\n")          // skip 8-byte length prefix
 		sec.WriteString("    movsd xmm0, [r12 + r13]\n")
 		// also load as rax for possible pointer use
 		sec.WriteString("    movq rax, xmm0\n")
@@ -961,16 +1291,16 @@ func (cg *CppGenerator) genFileRead(n *parser.FileReadExpression, sec *strings.B
 
 	if cg.platform == PlatformWindows {
 		// fopen(path, "r")
-		sec.WriteString("    mov r12, rax\n")              // save path ptr
-		sec.WriteString("    mov rcx, r12\n")              // arg1: path
-		sec.WriteString("    lea rdx, [file_r]\n")         // arg2: mode "r"
+		sec.WriteString("    mov r12, rax\n")      // save path ptr
+		sec.WriteString("    mov rcx, r12\n")      // arg1: path
+		sec.WriteString("    lea rdx, [file_r]\n") // arg2: mode "r"
 		sec.WriteString("    sub rsp, 32\n")
 		sec.WriteString("    call fopen\n")
 		sec.WriteString("    add rsp, 32\n")
-		sec.WriteString("    mov r13, rax\n")              // r13 = FILE*
+		sec.WriteString("    mov r13, rax\n") // r13 = FILE*
 		// Check if file opened
 		sec.WriteString("    test r13, r13\n")
-		sec.WriteString("    jz .fread_fail\n")            // skip read if NULL
+		sec.WriteString("    jz .fread_fail\n") // skip read if NULL
 		// fseek(FILE*, 0, SEEK_END=2)
 		sec.WriteString("    mov rcx, r13\n")
 		sec.WriteString("    xor rdx, rdx\n")
@@ -983,7 +1313,7 @@ func (cg *CppGenerator) genFileRead(n *parser.FileReadExpression, sec *strings.B
 		sec.WriteString("    sub rsp, 32\n")
 		sec.WriteString("    call ftell\n")
 		sec.WriteString("    add rsp, 32\n")
-		sec.WriteString("    mov r14, rax\n")              // r14 = size
+		sec.WriteString("    mov r14, rax\n") // r14 = size
 		// fseek(FILE*, 0, SEEK_SET=0)
 		sec.WriteString("    mov rcx, r13\n")
 		sec.WriteString("    xor rdx, rdx\n")
@@ -1010,7 +1340,7 @@ func (cg *CppGenerator) genFileRead(n *parser.FileReadExpression, sec *strings.B
 		sec.WriteString("    lea rax, [scratch_buf]\n")
 		sec.WriteString("    jmp .fread_done\n")
 		sec.WriteString(".fread_fail:\n")
-		sec.WriteString("    xor rax, rax\n")              // return NULL on error
+		sec.WriteString("    xor rax, rax\n") // return NULL on error
 		sec.WriteString(".fread_done:\n")
 	} else {
 		// Linux: same but System V ABI
@@ -1066,7 +1396,7 @@ func (cg *CppGenerator) genFileWrite(n *parser.FileWriteStatement, sec *strings.
 		sec.WriteString("    sub rsp, 32\n")
 		sec.WriteString("    call fopen\n")
 		sec.WriteString("    add rsp, 32\n")
-		sec.WriteString("    mov r14, rax\n")             // r14 = FILE*
+		sec.WriteString("    mov r14, rax\n") // r14 = FILE*
 		sec.WriteString("    test r14, r14\n")
 		sec.WriteString("    jz .fwrite_done\n")
 		// strlen(content) → r15 = length
@@ -1155,6 +1485,9 @@ func (cg *CppGenerator) genBinaryOp(n *parser.PostfixExpression, sec *strings.Bu
 		sec.WriteString("    mulsd xmm1, xmm0\n")
 		sec.WriteString("    movsd xmm0, xmm1\n")
 	case "бөлу":
+		sec.WriteString("    xorpd xmm2, xmm2\n")
+		sec.WriteString("    comisd xmm0, xmm2\n")
+		sec.WriteString("    je _runtime_divide_by_zero_error\n")
 		sec.WriteString("    divsd xmm1, xmm0\n")
 		sec.WriteString("    movsd xmm0, xmm1\n")
 	case "үлкен", "кіші", "тең", "тең_емес", "үлкен_тең", "кіші_тең":
@@ -1162,12 +1495,18 @@ func (cg *CppGenerator) genBinaryOp(n *parser.PostfixExpression, sec *strings.Bu
 		sec.WriteString("    xor rax, rax\n")
 		sec.WriteString("    comisd xmm1, xmm0\n")
 		switch n.Operator {
-		case "үлкен":    sec.WriteString("    seta al\n")
-		case "кіші":     sec.WriteString("    setb al\n")
-		case "тең":      sec.WriteString("    sete al\n")
-		case "тең_емес": sec.WriteString("    setne al\n")
-		case "үлкен_тең": sec.WriteString("    setae al\n")
-		case "кіші_тең":  sec.WriteString("    setbe al\n")
+		case "үлкен":
+			sec.WriteString("    seta al\n")
+		case "кіші":
+			sec.WriteString("    setb al\n")
+		case "тең":
+			sec.WriteString("    sete al\n")
+		case "тең_емес":
+			sec.WriteString("    setne al\n")
+		case "үлкен_тең":
+			sec.WriteString("    setae al\n")
+		case "кіші_тең":
+			sec.WriteString("    setbe al\n")
 		}
 		sec.WriteString("    cvtsi2sd xmm0, rax\n")
 	}
@@ -1177,20 +1516,103 @@ func (cg *CppGenerator) genBinaryOp(n *parser.PostfixExpression, sec *strings.Bu
 // Function call
 // ---------------------------------------------------------------------------
 
-var linuxArgRegs  = []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
+var linuxArgRegs = []string{"rdi", "rsi", "rdx", "rcx", "r8", "r9"}
 var linuxFloatRegs = []string{"xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5"}
-var winArgRegs    = []string{"rcx", "rdx", "r8", "r9"}
-var winFloatRegs  = []string{"xmm0", "xmm1", "xmm2", "xmm3"}
+var winArgRegs = []string{"rcx", "rdx", "r8", "r9"}
+var winFloatRegs = []string{"xmm0", "xmm1", "xmm2", "xmm3"}
 
 func (cg *CppGenerator) genCallExpr(n *parser.CallExpression, sec *strings.Builder) {
+	// Check standard library built-in functions
+	switch n.Function {
+	case "мәтін_ұзындығы":
+		sec.WriteString("    ; мәтін_ұзындығы\n")
+		cg.genExpression(n.Arguments[0], sec) // rax = char*
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    mov rcx, rax\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call strlen\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    mov rdi, rax\n")
+			sec.WriteString("    call strlen\n")
+		}
+		// Convert size in rax to double float in xmm0
+		sec.WriteString("    cvtsi2sd xmm0, rax\n")
+		return
+
+	case "таңба":
+		sec.WriteString("    ; таңба\n")
+		cg.genExpression(n.Arguments[0], sec) // rax = int code
+		sec.WriteString("    mov [char_buf], al\n")
+		sec.WriteString("    mov byte [char_buf + 1], 0\n")
+		sec.WriteString("    lea rax, [char_buf]\n")
+		return
+
+	case "бүтін":
+		sec.WriteString("    ; бүтін\n")
+		cg.genExpression(n.Arguments[0], sec) // xmm0 = float
+		sec.WriteString("    cvttsd2si rax, xmm0\n")
+		sec.WriteString("    cvtsi2sd xmm0, rax\n")
+		return
+
+	case "кездейсоқ":
+		sec.WriteString("    ; кездейсоқ\n")
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call rand\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    call rand\n")
+		}
+		// Convert rand int in rax to double float in xmm0
+		sec.WriteString("    cvtsi2sd xmm0, rax\n")
+		return
+	}
+
+	// Check if it is a struct constructor
+	if structDef, ok := cg.structs[n.Function]; ok {
+		numFields := len(structDef.Fields)
+		size := numFields * 8
+		if size == 0 {
+			size = 8
+		}
+		sec.WriteString(fmt.Sprintf("    ; инициализациялау (constructor) %s\n", n.Function))
+		if cg.platform == PlatformWindows {
+			sec.WriteString(fmt.Sprintf("    mov rcx, %d\n", size))
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call malloc\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString(fmt.Sprintf("    mov rdi, %d\n", size))
+			sec.WriteString("    call malloc\n")
+		}
+		// Save struct pointer on stack
+		sec.WriteString("    push rax\n")
+		// Evaluate arguments and assign to fields
+		for i, arg := range n.Arguments {
+			cg.genExpression(arg, sec)
+			sec.WriteString("    mov r12, [rsp]\n") // peek struct pointer
+			fieldType := structDef.Types[i]
+			fieldOffset := i * 8
+			if fieldType == "МӘТІН" || fieldType == "ТІЗІМ" || (fieldType != "САН" && fieldType != "БҮТІН" && fieldType != "АҚИҚАТ" && fieldType != "БАЙТ") {
+				sec.WriteString(fmt.Sprintf("    mov [r12 + %d], rax\n", fieldOffset))
+			} else {
+				sec.WriteString(fmt.Sprintf("    movsd [r12 + %d], xmm0\n", fieldOffset))
+			}
+		}
+		sec.WriteString("    pop rax\n") // return struct pointer in rax
+		return
+	}
+
 	sec.WriteString(fmt.Sprintf("    ; шақыру %s\n", n.Function))
 
+	funcLabel := strings.ReplaceAll(n.Function, ".", "_")
 	nArgs := len(n.Arguments)
 	if nArgs == 0 {
 		if cg.platform == PlatformWindows {
 			sec.WriteString("    sub rsp, 32\n")
 		}
-		sec.WriteString(fmt.Sprintf("    call %s\n", n.Function))
+		sec.WriteString(fmt.Sprintf("    call %s\n", funcLabel))
 		if cg.platform == PlatformWindows {
 			sec.WriteString("    add rsp, 32\n")
 		}
@@ -1248,7 +1670,7 @@ func (cg *CppGenerator) genCallExpr(n *parser.CallExpression, sec *strings.Build
 	if cg.platform == PlatformWindows {
 		sec.WriteString("    sub rsp, 32\n")
 	}
-	sec.WriteString(fmt.Sprintf("    call %s\n", n.Function))
+	sec.WriteString(fmt.Sprintf("    call %s\n", funcLabel))
 	if cg.platform == PlatformWindows {
 		sec.WriteString("    add rsp, 32\n")
 	}
@@ -1266,20 +1688,23 @@ func (cg *CppGenerator) genFunctionDef(fs *parser.FunctionStatement) {
 	outerOffset := cg.currentOffset
 	outerFunc := cg.currentFunc
 	outerIsString := cg.varIsString
+	outerEnv := cg.env
 
 	// New scope
 	cg.varOffsets = make(map[string]int)
 	cg.currentOffset = 0
 	cg.currentFunc = fs.Name
 	cg.varIsString = make(map[string]bool)
+	cg.env = typechecker.NewEnclosedTypeEnv(cg.env)
 
 	stackSize := cg.calcStackSize(fs.Body.Statements)
 	// Add space for params
 	stackSize += len(fs.Parameters) * 8
 	stackSize = alignTo16(stackSize)
 
+	funcLabel := strings.ReplaceAll(fs.Name, ".", "_")
 	sec.WriteString(fmt.Sprintf("\n; функция %s\n", fs.Name))
-	sec.WriteString(fs.Name + ":\n")
+	sec.WriteString(funcLabel + ":\n")
 	sec.WriteString("    push rbp\n")
 	sec.WriteString("    mov rbp, rsp\n")
 	if stackSize > 0 {
@@ -1293,10 +1718,13 @@ func (cg *CppGenerator) genFunctionDef(fs *parser.FunctionStatement) {
 	for i, param := range fs.Parameters {
 		off := cg.allocVar(param)
 		isStr := false
+		var pt typechecker.Type = typechecker.UNKNOWN
 		if sig != nil && i < len(sig.ParamTypes) {
-			isStr = sig.ParamTypes[i] == typechecker.STRING_TYPE
+			pt = sig.ParamTypes[i]
+			isStr = pt == typechecker.STRING_TYPE || pt == typechecker.ARRAY_TYPE || strings.HasPrefix(string(pt), "ҚҰРЫЛЫМ_")
 		}
 		cg.varIsString[param] = isStr
+		cg.env.Set(param, pt)
 
 		if isStr {
 			// String/pointer arg: lives in integer arg register (rdi, rsi, ...)
@@ -1328,6 +1756,7 @@ func (cg *CppGenerator) genFunctionDef(fs *parser.FunctionStatement) {
 	cg.currentOffset = outerOffset
 	cg.currentFunc = outerFunc
 	cg.varIsString = outerIsString
+	cg.env = outerEnv
 }
 
 // ---------------------------------------------------------------------------

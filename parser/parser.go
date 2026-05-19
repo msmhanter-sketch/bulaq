@@ -50,11 +50,57 @@ func (p *Parser) ParseProgram() *Program {
 }
 
 func (p *Parser) parseTopLevelStatement() Statement {
-	// Function definition must be top-level keyword
 	if p.curToken.Type == lexer.FUNC {
 		return p.parseFunctionStatement()
 	}
+	if p.curToken.Type == lexer.STRUCT {
+		return p.parseStructStatement()
+	}
 	return p.parseStatement()
+}
+
+// құрылым Адам { аты жасы }
+func (p *Parser) parseStructStatement() *StructStatement {
+	p.nextToken() // cur = name
+	if p.curToken.Type != lexer.IDENTIFIER {
+		p.errorf("құрылым атауы күтілді")
+		return nil
+	}
+	name := p.curToken.Literal
+	p.nextToken() // cur = {
+
+	if p.curToken.Type != lexer.LBRACE {
+		p.errorf("'{' күтілді")
+		return nil
+	}
+	p.nextToken() // cur = first field
+
+	var fields []string
+	var types []string
+	for p.curToken.Type != lexer.RBRACE && p.curToken.Type != lexer.EOF {
+		if p.curToken.Type == lexer.IDENTIFIER {
+			fieldName := p.curToken.Literal
+			fieldType := "САН" // default type is float/number
+
+			// If next token is a type keyword, consume it as type
+			if p.peekToken.Type == lexer.TYPE_INT ||
+				p.peekToken.Type == lexer.TYPE_FLOAT ||
+				p.peekToken.Type == lexer.TYPE_STRING ||
+				p.peekToken.Type == lexer.TYPE_BOOL ||
+				p.peekToken.Type == lexer.TYPE_BYTE ||
+				p.peekToken.Type == lexer.IDENTIFIER {
+				p.nextToken()
+				fieldType = p.curToken.Literal
+			}
+
+			fields = append(fields, fieldName)
+			types = append(types, fieldType)
+		}
+		p.nextToken()
+	}
+	// cur = }
+
+	return &StructStatement{Name: name, Fields: fields, Types: types}
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +206,35 @@ func (p *Parser) parseExpression() Node {
 				}
 				stack = append(stack, callExpr)
 			} else {
-				stack = append(stack, &Identifier{Value: p.curToken.Literal})
+				id := p.curToken.Literal
+				if len(id) > 0 && id[0] == '.' {
+					if len(stack) < 1 {
+						p.errorf("өріске кіру үшін объект қажет")
+						return nil
+					}
+					target := stack[len(stack)-1].(Expression)
+					stack = stack[:len(stack)-1]
+					stack = append(stack, &StructFieldAccessExpression{
+						StructName: "",
+						Field:      id[1:],
+						Target:     target,
+					})
+				} else {
+					isStructField := false
+					for i := 0; i < len(id); i++ {
+						if id[i] == '.' {
+							stack = append(stack, &StructFieldAccessExpression{
+								StructName: id[:i],
+								Field:      id[i+1:],
+							})
+							isStructField = true
+							break
+						}
+					}
+					if !isStructField {
+						stack = append(stack, &Identifier{Value: id})
+					}
+				}
 			}
 
 		case lexer.TRUE:
@@ -168,9 +242,6 @@ func (p *Parser) parseExpression() Node {
 
 		case lexer.FALSE:
 			stack = append(stack, &BoolLiteral{Value: false})
-
-		case lexer.VAR:
-			// "айнымалы" optional keyword — skip, болсын is handled below the switch optional keyword
 
 		// --- Array literal: [ ... ] ---
 		case lexer.LBRACKET:
@@ -430,6 +501,69 @@ func (p *Parser) parseExpression() Node {
 			stack = append(stack, stmt)
 			return stack[0]
 
+		// --- Struct Create: Адам жасау ---
+		case lexer.NEW:
+			if len(stack) < 1 {
+				p.errorf("'жасау' 1 операнд талап етеді (құрылым атауы)")
+				return nil
+			}
+			val := stack[len(stack)-1].(Expression)
+			stack = stack[:len(stack)-1]
+
+			id, ok := val.(*Identifier)
+			if !ok {
+				p.errorf("'жасау' алдында құрылым атауы болуы керек")
+				return nil
+			}
+			stack = append(stack, &StructCreateExpression{StructName: id.Value})
+
+		// --- Variable Assign: x 10 болсын, OR adam.name "Ali" болсын ---
+		case lexer.VAR:
+			if len(stack) < 2 {
+				p.errorf("айнымалыға меншіктеу ('болсын') 2 операнд талап етеді: мән және айнымалы")
+				return nil
+			}
+			val := stack[len(stack)-1].(Expression)    // 10
+			idExpr := stack[len(stack)-2].(Expression) // x
+			stack = stack[:len(stack)-2]
+
+			idNode, ok := idExpr.(*Identifier)
+			if !ok {
+				// We also allow StructFieldAccessExpression to be assigned to, but since we parse
+				// object.field as an Identifier initially, we need to check if it has a dot.
+				// Wait, if it was parsed as StructFieldAccessExpression in parseSingleExpression,
+				// we check that.
+				if sfa, isSfa := idExpr.(*StructFieldAccessExpression); isSfa {
+					stmt := &StructFieldAssignStatement{
+						StructName: sfa.StructName,
+						Field:      sfa.Field,
+						Value:      val,
+						Target:     sfa.Target,
+					}
+					stack = append(stack, stmt)
+					return stack[0]
+				}
+
+				p.errorf("айнымалы атауы жарамсыз: %v", idExpr)
+				return nil
+			}
+
+			stmt := &VarAssignStatement{Name: idNode, Value: val}
+			stack = append(stack, stmt)
+			return stack[0]
+
+		// --- BREAK: үзу ---
+		case lexer.BREAK:
+			stmt := &BreakStatement{}
+			stack = append(stack, stmt)
+			return stack[0]
+
+		// --- CONTINUE: жалғастыру ---
+		case lexer.CONTINUE:
+			stmt := &ContinueStatement{}
+			stack = append(stack, stmt)
+			return stack[0]
+
 		// --- FREE: arr бос ---
 		case lexer.FREE:
 			if len(stack) < 1 {
@@ -439,6 +573,22 @@ func (p *Parser) parseExpression() Node {
 			val := stack[len(stack)-1].(Expression)
 			stack = stack[:len(stack)-1]
 			stmt := &FreeStatement{Value: val}
+			stack = append(stack, stmt)
+			return stack[0]
+
+		// --- IMPORT: "path" енгізу ---
+		case lexer.IMPORT:
+			if len(stack) < 1 {
+				p.errorf("'енгізу' 1 операнд талап етеді (жол атауы)")
+				return nil
+			}
+			pathNode, ok := stack[len(stack)-1].(*StringLiteral)
+			if !ok {
+				p.errorf("'енгізу' жол атауын талап етеді")
+				return nil
+			}
+			stack = stack[:len(stack)-1]
+			stmt := &ImportStatement{Path: pathNode.Value}
 			stack = append(stack, stmt)
 			return stack[0]
 		}
@@ -504,6 +654,7 @@ func (p *Parser) parseArgExpression() Expression {
 	var stack []Expression
 	for p.curToken.Type != lexer.RPAREN &&
 		p.curToken.Type != lexer.COMMA &&
+		p.curToken.Type != lexer.RBRACKET &&
 		p.curToken.Type != lexer.EOF {
 
 		switch p.curToken.Type {
@@ -523,6 +674,28 @@ func (p *Parser) parseArgExpression() Expression {
 			stack = append(stack, &BoolLiteral{Value: true})
 		case lexer.FALSE:
 			stack = append(stack, &BoolLiteral{Value: false})
+		case lexer.LBRACKET:
+			arr := p.parseArrayLiteral()
+			if arr != nil {
+				stack = append(stack, arr)
+			}
+		case lexer.NEW:
+			if len(stack) >= 1 {
+				val := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				id, ok := val.(*Identifier)
+				if ok {
+					stack = append(stack, &StructCreateExpression{StructName: id.Value})
+				}
+			}
+		case lexer.FILE_READ:
+			if len(stack) >= 1 {
+				path := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				stack = append(stack, &FileReadExpression{Path: path})
+			}
+		case lexer.INPUT:
+			stack = append(stack, &InputExpression{})
 		case lexer.IDENTIFIER:
 			if p.peekToken.Type == lexer.LPAREN {
 				callExpr := p.parseCallExpression(p.curToken.Literal)
@@ -531,7 +704,35 @@ func (p *Parser) parseArgExpression() Expression {
 					continue
 				}
 			} else {
-				stack = append(stack, &Identifier{Value: p.curToken.Literal})
+				id := p.curToken.Literal
+				if len(id) > 0 && id[0] == '.' {
+					if len(stack) < 1 {
+						p.errorf("өріске кіру үшін объект қажет")
+						return nil
+					}
+					target := stack[len(stack)-1].(Expression)
+					stack = stack[:len(stack)-1]
+					stack = append(stack, &StructFieldAccessExpression{
+						StructName: "",
+						Field:      id[1:],
+						Target:     target,
+					})
+				} else {
+					isStructField := false
+					for i := 0; i < len(id); i++ {
+						if id[i] == '.' {
+							stack = append(stack, &StructFieldAccessExpression{
+								StructName: id[:i],
+								Field:      id[i+1:],
+							})
+							isStructField = true
+							break
+						}
+					}
+					if !isStructField {
+						stack = append(stack, &Identifier{Value: id})
+					}
+				}
 			}
 		case lexer.PLUS, lexer.MINUS, lexer.MUL, lexer.DIV,
 			lexer.GT, lexer.LT, lexer.EQ, lexer.NEQ, lexer.GTE, lexer.LTE,
@@ -630,7 +831,19 @@ func (p *Parser) parseSingleExpression() Expression {
 	case lexer.STRING:
 		return &StringLiteral{Value: p.curToken.Literal}
 	case lexer.IDENTIFIER:
-		return &Identifier{Value: p.curToken.Literal}
+		id := p.curToken.Literal
+		// Check if it is a struct field access (e.g. adam.аты)
+		importStrings := true // we'll just check manually to avoid adding imports if not present
+		_ = importStrings
+		for i := 0; i < len(id); i++ {
+			if id[i] == '.' {
+				return &StructFieldAccessExpression{
+					StructName: id[:i],
+					Field:      id[i+1:],
+				}
+			}
+		}
+		return &Identifier{Value: id}
 	case lexer.TRUE:
 		return &BoolLiteral{Value: true}
 	case lexer.FALSE:
@@ -648,11 +861,13 @@ func (p *Parser) parseArrayLiteral() *ArrayLiteral {
 	p.nextToken() // cur = first element or ]
 	var elements []Expression
 	for p.curToken.Type != lexer.RBRACKET && p.curToken.Type != lexer.EOF {
-		expr := p.parseSingleExpression()
+		expr := p.parseArgExpression()
 		if expr != nil {
 			elements = append(elements, expr)
 		}
-		p.nextToken()
+		if p.curToken.Type == lexer.COMMA {
+			p.nextToken()
+		}
 	}
 	// cur = ]
 	return &ArrayLiteral{Elements: elements}
