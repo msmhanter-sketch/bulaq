@@ -119,6 +119,8 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 	// --- Literals ---
 	case *parser.NumberLiteral:
 		return NUMBER_TYPE
+	case *parser.IntLiteral:
+		return INT_TYPE
 	case *parser.StringLiteral:
 		return STRING_TYPE
 	case *parser.BoolLiteral:
@@ -167,13 +169,21 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 				tc.errorf("'%s' арифметика операторы сандық тип талап етеді, бірақ %s берілді", node.Operator, leftType)
 				return UNKNOWN
 			}
-			if leftType != rightType {
-				tc.errorf("'%s' типтер сәйкес емес: %s және %s", node.Operator, leftType, rightType)
+			if rightType != NUMBER_TYPE && rightType != INT_TYPE && rightType != BYTE_TYPE {
+				tc.errorf("'%s' арифметика операторы сандық тип талап етеді, бірақ %s берілді", node.Operator, rightType)
 				return UNKNOWN
+			}
+			if leftType == NUMBER_TYPE || rightType == NUMBER_TYPE {
+				return NUMBER_TYPE
 			}
 			return leftType
 
 		case "үлкен", "кіші", "тең", "тең_емес", "үлкен_тең", "кіші_тең":
+			isLeftNum := (leftType == NUMBER_TYPE || leftType == INT_TYPE)
+			isRightNum := (rightType == NUMBER_TYPE || rightType == INT_TYPE)
+			if (isLeftNum && isRightNum) {
+				return BOOL_TYPE
+			}
 			if leftType != rightType {
 				tc.errorf("'%s' салыстыру операторы үшін типтер сәйкес болуы керек, бірақ %s және %s", node.Operator, leftType, rightType)
 			}

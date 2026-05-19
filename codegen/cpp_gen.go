@@ -485,6 +485,20 @@ func (cg *CppGenerator) genPrint(n *parser.PrintStatement, sec *strings.Builder)
 			sec.WriteString("    add rsp, 32\n")
 		}
 
+	case *parser.IntLiteral:
+		if cg.platform == PlatformLinux {
+			sec.WriteString(fmt.Sprintf("    mov rsi, %d\n", val.Value))
+			sec.WriteString("    mov rdi, fmt_int\n")
+			sec.WriteString("    xor rax, rax\n")
+			sec.WriteString("    call printf\n")
+		} else {
+			sec.WriteString(fmt.Sprintf("    mov rdx, %d\n", val.Value))
+			sec.WriteString("    lea rcx, [fmt_int]\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call printf\n")
+			sec.WriteString("    add rsp, 32\n")
+		}
+
 	case *parser.Identifier:
 		off, ok := cg.getVarOffset(val.Value)
 		if !ok {
@@ -650,6 +664,11 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 	case *parser.NumberLiteral:
 		label := cg.newFloat(n.Value)
 		sec.WriteString(fmt.Sprintf("    movsd xmm0, [%s]\n", label))
+
+	case *parser.IntLiteral:
+		// Temporary compatibility shim: evaluate into xmm0 as float for math ops.
+		sec.WriteString(fmt.Sprintf("    mov rax, %d\n", n.Value))
+		sec.WriteString("    cvtsi2sd xmm0, rax\n")
 
 	case *parser.StringLiteral:
 		label := cg.newStr(n.Value)

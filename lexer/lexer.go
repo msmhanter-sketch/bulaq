@@ -13,7 +13,8 @@ const (
 	ILLEGAL
 
 	// Data Types
-	NUMBER
+	NUMBER      // float
+	INT_LITERAL // int64
 	STRING
 	IDENTIFIER
 
@@ -238,14 +239,18 @@ func (l *Lexer) NextToken() Token {
 		tok.Col = l.col
 	default:
 		if isDigit(l.ch) {
-			tok.Type = NUMBER
 			tok.Line = l.line
 			tok.Col = l.col
-			num, ok := l.readNumber()
+			num, ok, isFloat := l.readNumber()
 			if !ok {
 				tok.Type = ILLEGAL
 				tok.Literal = num
 				return tok
+			}
+			if isFloat {
+				tok.Type = NUMBER
+			} else {
+				tok.Type = INT_LITERAL
 			}
 			tok.Literal = num
 			return tok
@@ -292,9 +297,8 @@ func (l *Lexer) readIdentifier() string {
 	return l.input[startPos:l.position]
 }
 
-// readNumber returns the number literal and a boolean indicating validity.
-// Validates that there is at most one decimal point.
-func (l *Lexer) readNumber() (string, bool) {
+// readNumber returns the number literal, a boolean indicating validity, and a boolean indicating if it's a float.
+func (l *Lexer) readNumber() (string, bool, bool) {
 	startPos := l.position
 	dotCount := 0
 	for isDigit(l.ch) || l.ch == '.' {
@@ -305,12 +309,12 @@ func (l *Lexer) readNumber() (string, bool) {
 				for isDigit(l.ch) || l.ch == '.' {
 					l.readChar()
 				}
-				return l.input[startPos:l.position], false
+				return l.input[startPos:l.position], false, false
 			}
 		}
 		l.readChar()
 	}
-	return l.input[startPos:l.position], true
+	return l.input[startPos:l.position], true, dotCount == 1
 }
 
 // readString returns the string contents (without quotes) and a bool indicating if it was properly closed.

@@ -77,6 +77,12 @@ func (nl *NumberLiteral) expressionNode()      {}
 func (nl *NumberLiteral) TokenLiteral() string { return "number" }
 func (nl *NumberLiteral) String() string       { return fmt.Sprintf("%v", nl.Value) }
 
+type IntLiteral struct{ Value int64 }
+
+func (il *IntLiteral) expressionNode()      {}
+func (il *IntLiteral) TokenLiteral() string { return "int" }
+func (il *IntLiteral) String() string       { return fmt.Sprintf("%d", il.Value) }
+
 type StringLiteral struct{ Value string }
 
 func (sl *StringLiteral) expressionNode()      {}

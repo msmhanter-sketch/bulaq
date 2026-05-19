@@ -140,6 +140,14 @@ func (p *Parser) parseExpression() Node {
 			}
 			stack = append(stack, &NumberLiteral{Value: val})
 
+		case lexer.INT_LITERAL:
+			val, err := strconv.ParseInt(p.curToken.Literal, 10, 64)
+			if err != nil {
+				p.errorf("жарамсыз бүтін сан: '%s'", p.curToken.Literal)
+				return nil
+			}
+			stack = append(stack, &IntLiteral{Value: val})
+
 		case lexer.STRING:
 			stack = append(stack, &StringLiteral{Value: p.curToken.Literal})
 
@@ -504,6 +512,11 @@ func (p *Parser) parseArgExpression() Expression {
 			if err == nil {
 				stack = append(stack, &NumberLiteral{Value: val})
 			}
+		case lexer.INT_LITERAL:
+			val, err := strconv.ParseInt(p.curToken.Literal, 10, 64)
+			if err == nil {
+				stack = append(stack, &IntLiteral{Value: val})
+			}
 		case lexer.STRING:
 			stack = append(stack, &StringLiteral{Value: p.curToken.Literal})
 		case lexer.TRUE:
@@ -607,6 +620,13 @@ func (p *Parser) parseSingleExpression() Expression {
 			return nil
 		}
 		return &NumberLiteral{Value: val}
+	case lexer.INT_LITERAL:
+		val, err := strconv.ParseInt(p.curToken.Literal, 10, 64)
+		if err != nil {
+			p.errorf("жарамсыз бүтін сан: '%s'", p.curToken.Literal)
+			return nil
+		}
+		return &IntLiteral{Value: val}
 	case lexer.STRING:
 		return &StringLiteral{Value: p.curToken.Literal}
 	case lexer.IDENTIFIER:
