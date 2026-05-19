@@ -1,0 +1,7 @@
+butaq
+*.exe
+*.o
+*.obj
+out.asm
+*_out.asm
+math
