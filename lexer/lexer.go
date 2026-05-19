@@ -89,6 +89,9 @@ const (
 	// File I/O
 	FILE_READ  // файл_оқу
 	FILE_WRITE // файл_жазу
+
+	// User Input
+	INPUT // кіру
 )
 
 type Token struct {
@@ -162,6 +165,9 @@ var keywords = map[string]TokenType{
 	// File I/O
 	"файл_оқу":  FILE_READ,
 	"файл_жазу": FILE_WRITE,
+
+	// User Input
+	"кіру": INPUT,
 }
 
 type Lexer struct {

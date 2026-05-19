@@ -106,6 +106,7 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		cg.textSec.WriteString("    extern fseek\n")
 		cg.textSec.WriteString("    extern ftell\n")
 		cg.textSec.WriteString("    extern fflush\n")
+		cg.textSec.WriteString("    extern scanf\n")
 		cg.textSec.WriteString("    extern SetConsoleOutputCP\n")
 		cg.textSec.WriteString("    extern ExitProcess\n\n")
 	}
@@ -115,11 +116,13 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 	cg.dataSec.WriteString("    fmt_str   db \"%s\", 10, 0\n")
 	cg.dataSec.WriteString("    fmt_int   db \"%lld\", 10, 0\n")
 	cg.dataSec.WriteString("    fmt_numstr db \"%g\", 0\n")
+	cg.dataSec.WriteString("    fmt_input  db \"%[^\\n]\", 0\n") // кіру: read line from stdin
 	cg.dataSec.WriteString("    file_r    db \"r\", 0\n")
 	cg.dataSec.WriteString("    file_w    db \"w\", 0\n")
 	cg.dataSec.WriteString("    newline   db 10, 0\n")
 	// Static 64KB scratch buffer for string concat / file read
 	cg.bssSec.WriteString("    scratch_buf resb 65536\n")
+	cg.bssSec.WriteString("    input_buf   resb 4096\n")  // кіру: stdin line buffer
 	cg.bssSec.WriteString("    numstr_buf  resb 64\n")
 	cg.bssSec.WriteString("    char_buf    resb 4\n") // 1-char string for символ
 
@@ -197,7 +200,8 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		out.WriteString("    extern fread\n")
 		out.WriteString("    extern fwrite\n")
 		out.WriteString("    extern fseek\n")
-		out.WriteString("    extern ftell\n\n")
+		out.WriteString("    extern ftell\n")
+		out.WriteString("    extern scanf\n\n")
 	}
 
 	out.WriteString(cg.dataSec.String())
@@ -430,7 +434,7 @@ func (cg *CppGenerator) isStringExpr(e parser.Expression) bool {
 	switch val := e.(type) {
 	case *parser.StringLiteral, *parser.StrConcatExpression,
 		*parser.ToStrExpression, *parser.CharAtExpression,
-		*parser.FileReadExpression:
+		*parser.FileReadExpression, *parser.InputExpression:
 		return true
 	case *parser.Identifier:
 		return cg.varIsString[val.Value]
@@ -862,6 +866,23 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 
 	case *parser.FileReadExpression:
 		cg.genFileRead(n, sec)
+
+	case *parser.InputExpression:
+		// кіру — read one line from stdin via scanf("%[^\n]", input_buf)
+		sec.WriteString("    ; кіру — stdin-нен жол оқу\n")
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    lea rcx, [fmt_input]\n")
+			sec.WriteString("    lea rdx, [input_buf]\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call scanf\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    lea rdi, [fmt_input]\n")
+			sec.WriteString("    lea rsi, [input_buf]\n")
+			sec.WriteString("    xor rax, rax\n")
+			sec.WriteString("    call scanf\n")
+		}
+		sec.WriteString("    lea rax, [input_buf]\n") // return pointer to input line
 
 	case *parser.ArrayLiteral:
 		// Heap-allocate array: length prefix (8 bytes) + each element (8 bytes float64).

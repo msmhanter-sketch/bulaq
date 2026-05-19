@@ -383,6 +383,13 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		tc.Check(node.Value, env)
 		return STRING_TYPE
 
+	case *parser.FileReadExpression:
+		tc.Check(node.Path, env)
+		return STRING_TYPE
+
+	case *parser.InputExpression:
+		return STRING_TYPE
+
 	case *parser.FileWriteStatement:
 		return VOID_TYPE
 

@@ -247,6 +247,13 @@ func (fr *FileReadExpression) expressionNode()      {}
 func (fr *FileReadExpression) TokenLiteral() string { return "файл_оқу" }
 func (fr *FileReadExpression) String() string       { return "file_read(" + fr.Path.String() + ")" }
 
+// Input: кіру  → reads one line from stdin, returns string pointer
+type InputExpression struct{}
+
+func (ie *InputExpression) expressionNode()      {}
+func (ie *InputExpression) TokenLiteral() string { return "кіру" }
+func (ie *InputExpression) String() string       { return "кіру" }
+
 // File write: "path" content файл_жазу  → statement (writes content to file)
 type FileWriteStatement struct {
 	Path    Expression

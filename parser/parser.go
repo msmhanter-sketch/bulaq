@@ -319,6 +319,10 @@ func (p *Parser) parseExpression() Node {
 			stack = stack[:len(stack)-1]
 			stack = append(stack, &FileReadExpression{Path: path})
 
+		// --- INPUT: кіру → InputExpression (reads a line from stdin) ---
+		case lexer.INPUT:
+			stack = append(stack, &InputExpression{})
+
 		// --- FILE WRITE: path content файл_жазу → FileWriteStatement ---
 		// SOV: "salam.txt" "Сәлем!" файл_жазу
 		// stack[-2] = path, stack[-1] = content
