@@ -1,7 +1,21 @@
+# Binaries
 butaq
+butaq.exe
 *.exe
 *.o
 *.obj
+
+# Build output
 out.asm
+out.ll
 *_out.asm
+*_out.ll
+*.s
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+
+# Go build cache
 math

@@ -22,7 +22,27 @@ const (
 	STRUCT_TYPE Type = "ҚҰРЫЛЫМ"
 	VOID_TYPE   Type = "БОС"
 	UNKNOWN     Type = "БЕЛГІСІЗ"
+	JSON_TYPE   Type = "ЖСОН"
+	RESULT_TYPE Type = "НӘТИЖЕ"
 )
+
+func IsResultType(t Type) bool {
+	return t == "НӘТИЖЕ" || strings.HasPrefix(string(t), "НӘТИЖЕ_")
+}
+
+func GetResultUnderlyingType(t Type) Type {
+	if t == "НӘТИЖЕ" {
+		return UNKNOWN
+	}
+	if strings.HasPrefix(string(t), "НӘТИЖЕ_") {
+		return Type(strings.TrimPrefix(string(t), "НӘТИЖЕ_"))
+	}
+	return UNKNOWN
+}
+
+func MakeResultType(underlying Type) Type {
+	return Type("НӘТИЖЕ_" + string(underlying))
+}
 
 // ---------------------------------------------------------------------------
 // Type Environment (scoped)
@@ -71,23 +91,37 @@ type FuncSig struct {
 }
 
 // ---------------------------------------------------------------------------
-// TypeChecker
+// TypeError & TypeChecker
 // ---------------------------------------------------------------------------
+
+type TypeError struct {
+	Message string
+	Line    int
+	Col     int
+}
+
+func (e TypeError) Error() string {
+	return fmt.Sprintf("Тип қатесі (%d:%d): %s", e.Line, e.Col, e.Message)
+}
 
 type TypeChecker struct {
 	globalEnv   *TypeEnv
 	funcs       map[string]*FuncSig
 	structs     map[string]*parser.StructStatement
-	Errors      []string
+	interfaces  map[string]*parser.InterfaceStatement
+	Errors      []TypeError
 	currentFunc string // tracks which function we are checking
+	curLine     int
+	curCol      int
 }
 
 func New() *TypeChecker {
 	tc := &TypeChecker{
-		globalEnv: NewTypeEnv(),
-		funcs:     make(map[string]*FuncSig),
-		structs:   make(map[string]*parser.StructStatement),
-		Errors:    []string{},
+		globalEnv:  NewTypeEnv(),
+		funcs:      make(map[string]*FuncSig),
+		structs:    make(map[string]*parser.StructStatement),
+		interfaces: make(map[string]*parser.InterfaceStatement),
+		Errors:     []TypeError{},
 	}
 
 	tc.funcs["мәтін_ұзындығы"] = &FuncSig{
@@ -110,6 +144,319 @@ func New() *TypeChecker {
 		ParamTypes: []Type{},
 		ReturnType: NUMBER_TYPE,
 	}
+	tc.funcs["жүйе"] = &FuncSig{
+		Params:     []string{"команда"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["файл_жою"] = &FuncSig{
+		Params:     []string{"жол"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["аргумент_саны"] = &FuncSig{
+		Params:     []string{},
+		ParamTypes: []Type{},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["аргумент"] = &FuncSig{
+		Params:     []string{"индекс"},
+		ParamTypes: []Type{NUMBER_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["файл_бар_ма"] = &FuncSig{
+		Params:     []string{"жол"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["түбір"] = &FuncSig{
+		Params:     []string{"сан"},
+		ParamTypes: []Type{NUMBER_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["дәреже"] = &FuncSig{
+		Params:     []string{"негіз", "дәреже"},
+		ParamTypes: []Type{NUMBER_TYPE, NUMBER_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["синус"] = &FuncSig{
+		Params:     []string{"сан"},
+		ParamTypes: []Type{NUMBER_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["косинус"] = &FuncSig{
+		Params:     []string{"сан"},
+		ParamTypes: []Type{NUMBER_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["мәтін"] = &FuncSig{
+		Params:     []string{"сан"},
+		ParamTypes: []Type{NUMBER_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["сан"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["уақыт"] = &FuncSig{
+		Params:     []string{},
+		ParamTypes: []Type{},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["уақыт_мәтіні"] = &FuncSig{
+		Params:     []string{"пішім"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["ұйықтау"] = &FuncSig{
+		Params:     []string{"секунд"},
+		ParamTypes: []Type{NUMBER_TYPE},
+		ReturnType: VOID_TYPE,
+	}
+	tc.funcs["жүйе_шығысы"] = &FuncSig{
+		Params:     []string{"команда"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+
+	// JSON functions
+	tc.funcs["жсон_оқу"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: JSON_TYPE,
+	}
+	tc.funcs["жсон_жазу"] = &FuncSig{
+		Params:     []string{"объект"},
+		ParamTypes: []Type{JSON_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["жсон_сан_алу"] = &FuncSig{
+		Params:     []string{"объект", "кілт"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["жсон_мәтін_алу"] = &FuncSig{
+		Params:     []string{"объект", "кілт"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["жсон_логика_алу"] = &FuncSig{
+		Params:     []string{"объект", "кілт"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE},
+		ReturnType: BOOL_TYPE,
+	}
+	tc.funcs["жсон_нысан_алу"] = &FuncSig{
+		Params:     []string{"объект", "кілт"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE},
+		ReturnType: JSON_TYPE,
+	}
+	tc.funcs["жсон_тізім_алу"] = &FuncSig{
+		Params:     []string{"объект", "кілт"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE},
+		ReturnType: JSON_TYPE,
+	}
+	tc.funcs["жсон_тізім_өлшемі"] = &FuncSig{
+		Params:     []string{"тізім"},
+		ParamTypes: []Type{JSON_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["жсон_тізім_элементі"] = &FuncSig{
+		Params:     []string{"тізім", "индекс"},
+		ParamTypes: []Type{JSON_TYPE, NUMBER_TYPE},
+		ReturnType: JSON_TYPE,
+	}
+	tc.funcs["жсон_жаңа"] = &FuncSig{
+		Params:     []string{},
+		ParamTypes: []Type{},
+		ReturnType: JSON_TYPE,
+	}
+	tc.funcs["жсон_сан_қосу"] = &FuncSig{
+		Params:     []string{"объект", "кілт", "мән"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE, NUMBER_TYPE},
+		ReturnType: VOID_TYPE,
+	}
+	tc.funcs["жсон_мәтін_қосу"] = &FuncSig{
+		Params:     []string{"объект", "кілт", "мән"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE, STRING_TYPE},
+		ReturnType: VOID_TYPE,
+	}
+	tc.funcs["жсон_логика_қосу"] = &FuncSig{
+		Params:     []string{"объект", "кілт", "мән"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE, BOOL_TYPE},
+		ReturnType: VOID_TYPE,
+	}
+	tc.funcs["жсон_нысан_қосу"] = &FuncSig{
+		Params:     []string{"объект", "кілт", "мән"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE, JSON_TYPE},
+		ReturnType: VOID_TYPE,
+	}
+	tc.funcs["жсон_тізім_қосу"] = &FuncSig{
+		Params:     []string{"объект", "кілт", "мән"},
+		ParamTypes: []Type{JSON_TYPE, STRING_TYPE, JSON_TYPE},
+		ReturnType: VOID_TYPE,
+	}
+
+	// Crypto functions
+	tc.funcs["мд5"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["ша256"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["б64_кодтау"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["б64_декодтау"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+
+	// Thread function
+	tc.funcs["ағын_күту"] = &FuncSig{
+		Params:     []string{"ағын"},
+		ParamTypes: []Type{NUMBER_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+
+	// ── New String functions ──────────────────────────────────────────────
+	tc.funcs["мәтін_бөлу"] = &FuncSig{
+		Params:     []string{"мәтін", "бөлгіш", "индекс"},
+		ParamTypes: []Type{STRING_TYPE, STRING_TYPE, NUMBER_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["мәтін_бөлу_саны"] = &FuncSig{
+		Params:     []string{"мәтін", "бөлгіш"},
+		ParamTypes: []Type{STRING_TYPE, STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["мәтін_ауыстыру"] = &FuncSig{
+		Params:     []string{"мәтін", "ескі", "жаңа"},
+		ParamTypes: []Type{STRING_TYPE, STRING_TYPE, STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["мәтін_кіші"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["мәтін_жоғары"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["мәтін_қысқарту"] = &FuncSig{
+		Params:     []string{"мәтін"},
+		ParamTypes: []Type{STRING_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["мәтін_кесу"] = &FuncSig{
+		Params:     []string{"мәтін", "бастап", "дейін"},
+		ParamTypes: []Type{STRING_TYPE, NUMBER_TYPE, NUMBER_TYPE},
+		ReturnType: STRING_TYPE,
+	}
+	tc.funcs["мәтін_басталады"] = &FuncSig{
+		Params:     []string{"мәтін", "алдыңғы"},
+		ParamTypes: []Type{STRING_TYPE, STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["мәтін_аяқталады"] = &FuncSig{
+		Params:     []string{"мәтін", "соңғы"},
+		ParamTypes: []Type{STRING_TYPE, STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["мәтін_іздеу"] = &FuncSig{
+		Params:     []string{"мәтін", "іздеу"},
+		ParamTypes: []Type{STRING_TYPE, STRING_TYPE},
+		ReturnType: NUMBER_TYPE,
+	}
+
+	// ── Extended Math ──────────────────────────────────────────────────────
+	for _, fn := range []string{"абс", "еден", "төбе", "логарифм", "логарифм2", "логарифм10",
+		"дөңгелек", "тангенс", "арктангенс", "экспонента"} {
+		tc.funcs[fn] = &FuncSig{
+			Params: []string{"сан"}, ParamTypes: []Type{NUMBER_TYPE}, ReturnType: NUMBER_TYPE,
+		}
+	}
+	tc.funcs["ең_кіші"] = &FuncSig{
+		Params: []string{"а", "б"}, ParamTypes: []Type{NUMBER_TYPE, NUMBER_TYPE}, ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["ең_үлкен"] = &FuncSig{
+		Params: []string{"а", "б"}, ParamTypes: []Type{NUMBER_TYPE, NUMBER_TYPE}, ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["арктангенс2"] = &FuncSig{
+		Params: []string{"y", "x"}, ParamTypes: []Type{NUMBER_TYPE, NUMBER_TYPE}, ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["пи"] = &FuncSig{
+		Params: []string{}, ParamTypes: []Type{}, ReturnType: NUMBER_TYPE,
+	}
+
+	// ── Map / Dictionary ───────────────────────────────────────────────────
+	tc.funcs["сөздік_жаңа"] = &FuncSig{
+		Params: []string{}, ParamTypes: []Type{}, ReturnType: JSON_TYPE, // reuse JSON_TYPE for void* map
+	}
+	tc.funcs["сөздік_сан_қою"] = &FuncSig{
+		Params: []string{"сөздік", "кілт", "мән"}, ParamTypes: []Type{JSON_TYPE, STRING_TYPE, NUMBER_TYPE}, ReturnType: VOID_TYPE,
+	}
+	tc.funcs["сөздік_мәтін_қою"] = &FuncSig{
+		Params: []string{"сөздік", "кілт", "мән"}, ParamTypes: []Type{JSON_TYPE, STRING_TYPE, STRING_TYPE}, ReturnType: VOID_TYPE,
+	}
+	tc.funcs["сөздік_сан_алу"] = &FuncSig{
+		Params: []string{"сөздік", "кілт"}, ParamTypes: []Type{JSON_TYPE, STRING_TYPE}, ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["сөздік_мәтін_алу"] = &FuncSig{
+		Params: []string{"сөздік", "кілт"}, ParamTypes: []Type{JSON_TYPE, STRING_TYPE}, ReturnType: STRING_TYPE,
+	}
+	tc.funcs["сөздік_бар_ма"] = &FuncSig{
+		Params: []string{"сөздік", "кілт"}, ParamTypes: []Type{JSON_TYPE, STRING_TYPE}, ReturnType: NUMBER_TYPE,
+	}
+	tc.funcs["сөздік_жою"] = &FuncSig{
+		Params: []string{"сөздік", "кілт"}, ParamTypes: []Type{JSON_TYPE, STRING_TYPE}, ReturnType: VOID_TYPE,
+	}
+	tc.funcs["сөздік_өлшемі"] = &FuncSig{
+		Params: []string{"сөздік"}, ParamTypes: []Type{JSON_TYPE}, ReturnType: NUMBER_TYPE,
+	}
+
+	// ── Mutex / Synchronization ─────────────────────────────────────────────
+	tc.funcs["мьютекс_жаңа"] = &FuncSig{
+		Params: []string{}, ParamTypes: []Type{}, ReturnType: JSON_TYPE,
+	}
+	tc.funcs["мьютекс_бекіту"] = &FuncSig{
+		Params: []string{"мьютекс"}, ParamTypes: []Type{JSON_TYPE}, ReturnType: VOID_TYPE,
+	}
+	tc.funcs["мьютекс_босату"] = &FuncSig{
+		Params: []string{"мьютекс"}, ParamTypes: []Type{JSON_TYPE}, ReturnType: VOID_TYPE,
+	}
+	tc.funcs["мьютекс_жою"] = &FuncSig{
+		Params: []string{"мьютекс"}, ParamTypes: []Type{JSON_TYPE}, ReturnType: VOID_TYPE,
+	}
+
+	// ── StringBuilder ───────────────────────────────────────────────────────
+	tc.funcs["мәтін_жинақтаушы_жаңа"] = &FuncSig{
+		Params: []string{}, ParamTypes: []Type{}, ReturnType: JSON_TYPE,
+	}
+	tc.funcs["мәтін_жинақтаушы_қосу_мәтін"] = &FuncSig{
+		Params: []string{"жинақтаушы", "мәтін"}, ParamTypes: []Type{JSON_TYPE, STRING_TYPE}, ReturnType: VOID_TYPE,
+	}
+	tc.funcs["мәтін_жинақтаушы_қосу_сан"] = &FuncSig{
+		Params: []string{"жинақтаушы", "сан"}, ParamTypes: []Type{JSON_TYPE, NUMBER_TYPE}, ReturnType: VOID_TYPE,
+	}
+	tc.funcs["мәтін_жинақтаушы_қосу_таңба"] = &FuncSig{
+		Params: []string{"жинақтаушы", "код"}, ParamTypes: []Type{JSON_TYPE, NUMBER_TYPE}, ReturnType: VOID_TYPE,
+	}
+	tc.funcs["мәтін_жинақтаушы_жазу"] = &FuncSig{
+		Params: []string{"жинақтаушы"}, ParamTypes: []Type{JSON_TYPE}, ReturnType: STRING_TYPE,
+	}
+	tc.funcs["мәтін_жинақтаушы_жою"] = &FuncSig{
+		Params: []string{"жинақтаушы"}, ParamTypes: []Type{JSON_TYPE}, ReturnType: VOID_TYPE,
+	}
 
 	return tc
 }
@@ -119,8 +466,25 @@ func (tc *TypeChecker) GetStructs() map[string]*parser.StructStatement {
 	return tc.structs
 }
 
+// GetInterfaces returns the interface definitions (used by codegen)
+func (tc *TypeChecker) GetInterfaces() map[string]*parser.InterfaceStatement {
+	return tc.interfaces
+}
+
+func (tc *TypeChecker) ErrorStrings() []string {
+	var errs []string
+	for _, err := range tc.Errors {
+		errs = append(errs, err.Error())
+	}
+	return errs
+}
+
 func (tc *TypeChecker) errorf(format string, args ...interface{}) {
-	tc.Errors = append(tc.Errors, fmt.Sprintf("Тип қатесі: "+format, args...))
+	tc.Errors = append(tc.Errors, TypeError{
+		Message: fmt.Sprintf(format, args...),
+		Line:    tc.curLine,
+		Col:     tc.curCol,
+	})
 }
 
 // GetFuncs returns the function signature map (used by codegen)
@@ -128,23 +492,54 @@ func (tc *TypeChecker) GetFuncs() map[string]*FuncSig {
 	return tc.funcs
 }
 
+func (tc *TypeChecker) GetGlobalEnv() *TypeEnv {
+	return tc.globalEnv
+}
+
 // ---------------------------------------------------------------------------
 // Check entry point
 // ---------------------------------------------------------------------------
 
 func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
+	if node == nil {
+		return UNKNOWN
+	}
+	oldLine, oldCol := tc.curLine, tc.curCol
+	l, c := node.Position()
+	if l > 0 {
+		tc.curLine, tc.curCol = l, c
+	}
+	defer func() {
+		tc.curLine, tc.curCol = oldLine, oldCol
+	}()
+
 	switch node := node.(type) {
 
 	case *parser.Program:
-		// First pass: register all function signatures and structs
+		// First pass: register all function signatures, structs, and interfaces
 		for _, stmt := range node.Statements {
 			if fs, ok := stmt.(*parser.FunctionStatement); ok {
 				tc.registerFunction(fs, env)
 			} else if ss, ok := stmt.(*parser.StructStatement); ok {
 				tc.structs[ss.Name] = ss
+			} else if is, ok := stmt.(*parser.InterfaceStatement); ok {
+				tc.interfaces[is.Name] = is
 			}
 		}
-		// Second pass: check everything
+		// Second pass: check everything (populates signature and variable types)
+		for _, stmt := range node.Statements {
+			tc.Check(stmt, env)
+		}
+		// Clear intermediate errors from the inference pass
+		tc.Errors = []TypeError{}
+		// Clear global env store to allow clean type re-inference without type mismatch errors
+		env.store = make(map[string]Type)
+		for _, stmt := range node.Statements {
+			if fs, ok := stmt.(*parser.FunctionStatement); ok {
+				tc.registerFunction(fs, env)
+			}
+		}
+		// Third pass: final check with resolved parameter and return types
 		for _, stmt := range node.Statements {
 			tc.Check(stmt, env)
 		}
@@ -177,8 +572,11 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 	case *parser.UnaryExpression:
 		rightType := tc.Check(node.Right, env)
 		if node.Operator == "емес" {
+			if rightType == INT_TYPE {
+				return INT_TYPE
+			}
 			if rightType != BOOL_TYPE && rightType != UNKNOWN {
-				tc.errorf("'емес' операторы АҚИҚАТ типін талап етеді, бірақ %s берілді", rightType)
+				tc.errorf("'емес' операторы АҚИҚАТ немесе БҮТІН типін талап етеді, бірақ %s берілді", rightType)
 			}
 			return BOOL_TYPE
 		}
@@ -218,12 +616,23 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 			if isLeftNum && isRightNum {
 				return BOOL_TYPE
 			}
+			// Allow comparing struct pointers to 0 (null)
+			isLeftStruct := strings.HasPrefix(string(leftType), "ҚҰРЫЛЫМ_")
+			isRightStruct := strings.HasPrefix(string(rightType), "ҚҰРЫЛЫМ_")
+			if (isLeftStruct && rightType == INT_TYPE) || (isRightStruct && leftType == INT_TYPE) {
+				if node.Operator == "тең" || node.Operator == "тең_емес" {
+					return BOOL_TYPE
+				}
+			}
 			if leftType != rightType {
 				tc.errorf("'%s' салыстыру операторы үшін типтер сәйкес болуы керек, бірақ %s және %s", node.Operator, leftType, rightType)
 			}
 			return BOOL_TYPE
 
 		case "және", "немесе":
+			if leftType == INT_TYPE && rightType == INT_TYPE {
+				return INT_TYPE
+			}
 			if leftType != BOOL_TYPE {
 				tc.errorf("'%s' логикалық оператор АҚИҚАТ типін талап етеді, бірақ %s берілді (сол жақ)", node.Operator, leftType)
 			}
@@ -231,11 +640,42 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 				tc.errorf("'%s' логикалық оператор АҚИҚАТ типін талап етеді, бірақ %s берілді (оң жақ)", node.Operator, rightType)
 			}
 			return BOOL_TYPE
+
+		case "жылжыту_сол", "жылжыту_оң":
+			if leftType != INT_TYPE {
+				tc.errorf("'%s' операторы сол жақтан бүтін сан талап етеді, бірақ %s берілді", node.Operator, leftType)
+			}
+			if rightType != INT_TYPE {
+				tc.errorf("'%s' операторы оң жақтан бүтін сан талап етеді, бірақ %s берілді", node.Operator, rightType)
+			}
+			return INT_TYPE
 		}
 		return UNKNOWN
 
 	// --- Struct Operations ---
 	case *parser.StructStatement:
+		return VOID_TYPE
+
+	case *parser.InterfaceStatement:
+		tc.interfaces[node.Name] = node
+		for _, method := range node.Methods {
+			funcName := node.Name + "." + method.Name
+			paramTypes := []Type{Type("ИНТЕРФЕЙС_" + node.Name)}
+			params := []string{"өзі"}
+			for _, p := range method.Parameters {
+				paramTypes = append(paramTypes, tc.fieldTypeToType(p))
+				params = append(params, "арг")
+			}
+			retType := tc.fieldTypeToType(method.ReturnType)
+			if method.ReturnType == "" {
+				retType = VOID_TYPE
+			}
+			tc.funcs[funcName] = &FuncSig{
+				Params:     params,
+				ParamTypes: paramTypes,
+				ReturnType: retType,
+			}
+		}
 		return VOID_TYPE
 
 	case *parser.StructCreateExpression:
@@ -305,6 +745,9 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		case "БАЙТ":
 			return BYTE_TYPE
 		default:
+			if strings.HasPrefix(fieldTypeStr, "әлсіз_") {
+				return Type("ҚҰРЫЛЫМ_" + fieldTypeStr[len("әлсіз_"):])
+			}
 			return Type("ҚҰРЫЛЫМ_" + fieldTypeStr)
 		}
 
@@ -372,7 +815,11 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		case "БАЙТ":
 			expectedType = BYTE_TYPE
 		default:
-			expectedType = Type("ҚҰРЫЛЫМ_" + fieldTypeStr)
+			if strings.HasPrefix(fieldTypeStr, "әлсіз_") {
+				expectedType = Type("ҚҰРЫЛЫМ_" + fieldTypeStr[len("әлсіз_"):])
+			} else {
+				expectedType = Type("ҚҰРЫЛЫМ_" + fieldTypeStr)
+			}
 		}
 		if valType != expectedType && valType != UNKNOWN {
 			if expectedType == NUMBER_TYPE && valType == INT_TYPE {
@@ -453,7 +900,9 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 			env.Set(node.Name.Value, valType)
 		} else {
 			if existingType != valType && valType != UNKNOWN {
-				if strings.HasPrefix(string(existingType), "ҚҰРЫЛЫМ_") && valType == INT_TYPE {
+				if strings.HasPrefix(string(existingType), "ИНТЕРФЕЙС_") && strings.HasPrefix(string(valType), "ҚҰРЫЛЫМ_") && tc.satisfiesInterface(valType, existingType) {
+					// Allowed interface assignment
+				} else if strings.HasPrefix(string(existingType), "ҚҰРЫЛЫМ_") && valType == INT_TYPE {
 					// Null pointer assignment allowed
 				} else {
 					tc.errorf("'%s' айнымалысының типін өзгертуге болмайды (%s -> %s)", node.Name.Value, existingType, valType)
@@ -473,8 +922,42 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		// Propagate return type into the current function's signature
 		if tc.currentFunc != "" {
 			if sig, ok := tc.funcs[tc.currentFunc]; ok {
-				if sig.ReturnType == UNKNOWN && ret != UNKNOWN {
+				if sig.ReturnType == UNKNOWN {
 					sig.ReturnType = ret
+				} else {
+					current := sig.ReturnType
+					if IsResultType(current) {
+						underlying := GetResultUnderlyingType(current)
+						if IsResultType(ret) {
+							retUnderlying := GetResultUnderlyingType(ret)
+							if underlying == UNKNOWN && retUnderlying != UNKNOWN {
+								sig.ReturnType = MakeResultType(retUnderlying)
+							}
+						} else {
+							// Return non-result value in a result function -> allowed
+							if underlying == UNKNOWN {
+								sig.ReturnType = MakeResultType(ret)
+							} else if underlying != ret && ret != UNKNOWN {
+								if strings.HasPrefix(string(underlying), "ИНТЕРФЕЙС_") && strings.HasPrefix(string(ret), "ҚҰРЫЛЫМ_") && tc.satisfiesInterface(ret, underlying) {
+									// Allowed interface return in result
+								} else {
+									tc.errorf("типтер сәйкес емес: функция %s типті нәтиже күтеді, бірақ %s берілді", underlying, ret)
+								}
+							}
+						}
+					} else {
+						// Current type is not Result
+						if IsResultType(ret) {
+							// We return a Result, so function now returns Result<current>
+							sig.ReturnType = MakeResultType(current)
+						} else if current != ret && ret != UNKNOWN {
+							if strings.HasPrefix(string(current), "ИНТЕРФЕЙС_") && strings.HasPrefix(string(ret), "ҚҰРЫЛЫМ_") && tc.satisfiesInterface(ret, current) {
+								// Allowed interface return
+							} else {
+								tc.errorf("типтер сәйкес емес: функция %s типті мән қайтаруы керек, бірақ %s берілді", current, ret)
+							}
+						}
+					}
 				}
 			}
 		}
@@ -492,6 +975,10 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 					structName := string(t)[len("ҚҰРЫЛЫМ_"):]
 					node.Arguments = append([]parser.Expression{&parser.Identifier{Value: varName}}, node.Arguments...)
 					node.Function = structName + "." + methodName
+				} else if ok && strings.HasPrefix(string(t), "ИНТЕРФЕЙС_") {
+					interfaceName := string(t)[len("ИНТЕРФЕЙС_"):]
+					node.Arguments = append([]parser.Expression{&parser.Identifier{Value: varName}}, node.Arguments...)
+					node.Function = interfaceName + "." + methodName
 				}
 			}
 		}
@@ -519,6 +1006,22 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 				}
 				return Type("ҚҰРЫЛЫМ_" + node.Function)
 			}
+			// Интерфейс конструкторы/каст: ДыбысШығарғыш(ит) → ИНТЕРФЕЙС_ДыбысШығарғыш
+			if _, okInterf := tc.interfaces[node.Function]; okInterf {
+				if len(node.Arguments) != 1 {
+					tc.errorf("'%s' интерфейс конструкторы 1 аргумент талап етеді, бірақ %d берілді", node.Function, len(node.Arguments))
+					return UNKNOWN
+				}
+				argType := tc.Check(node.Arguments[0], env)
+				if !tc.satisfiesInterface(argType, Type("ИНТЕРФЕЙС_"+node.Function)) {
+					// During type inference passes, struct type may not be resolved yet — allow UNKNOWN
+					if argType != UNKNOWN {
+						tc.errorf("'%s' типі '%s' интерфейсін қанағаттандырмайды", argType, node.Function)
+					}
+					return Type("ИНТЕРФЕЙС_" + node.Function)
+				}
+				return Type("ИНТЕРФЕЙС_" + node.Function)
+			}
 			tc.errorf("'%s' функциясы табылмады", node.Function)
 			return UNKNOWN
 		}
@@ -528,8 +1031,19 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		for i, arg := range node.Arguments {
 			argType := tc.Check(arg, env)
 			if i < len(sig.ParamTypes) {
-				if sig.ParamTypes[i] == UNKNOWN || sig.ParamTypes[i] == "" {
+				expectedType := sig.ParamTypes[i]
+				if expectedType == UNKNOWN || expectedType == "" {
 					sig.ParamTypes[i] = argType
+				} else if expectedType != argType && argType != UNKNOWN {
+					if strings.HasPrefix(string(expectedType), "ИНТЕРФЕЙС_") && strings.HasPrefix(string(argType), "ҚҰРЫЛЫМ_") && tc.satisfiesInterface(argType, expectedType) {
+						// Allowed interface satisfaction
+					} else if expectedType == NUMBER_TYPE && argType == INT_TYPE {
+						// Promotion allowed
+					} else if strings.HasPrefix(string(expectedType), "ҚҰРЫЛЫМ_") && argType == INT_TYPE {
+						// Null pointer initializer allowed
+					} else {
+						tc.errorf("'%s' функциясының %d-аргументі %s типін күтеді, бірақ %s берілді", node.Function, i+1, expectedType, argType)
+					}
 				}
 			}
 		}
@@ -575,6 +1089,10 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 		}
 		tc.Check(node.Body, env)
 		return UNKNOWN
+
+	case *parser.ThreadStatement:
+		tc.Check(node.Body, env)
+		return NUMBER_TYPE
 
 	// --- Function definition ---
 	case *parser.FunctionStatement:
@@ -639,6 +1157,22 @@ func (tc *TypeChecker) Check(node parser.Node, env *TypeEnv) Type {
 	case *parser.ContinueStatement:
 		return VOID_TYPE
 
+	case *parser.ErrorLiteral:
+		tc.Check(node.Message, env)
+		return RESULT_TYPE
+
+	case *parser.TryErrorExpression:
+		leftType := tc.Check(node.Left, env)
+		if !IsResultType(leftType) {
+			tc.errorf("'қатемен' операторы тек нәтиже (Result) типі үшін қолданыла алады, бірақ %s берілді", leftType)
+			return UNKNOWN
+		}
+		underlying := GetResultUnderlyingType(leftType)
+		blockEnv := NewEnclosedTypeEnv(env)
+		blockEnv.Set(node.VarName, STRING_TYPE)
+		tc.Check(node.Block, blockEnv)
+		return underlying
+
 	// --- Expression statement ---
 	case *parser.ExpressionStatement:
 		return tc.Check(node.Expression, env)
@@ -660,15 +1194,82 @@ func (tc *TypeChecker) fieldTypeToType(ft string) Type {
 	case "БАЙТ":
 		return BYTE_TYPE
 	default:
+		if _, ok := tc.interfaces[ft]; ok {
+			return Type("ИНТЕРФЕЙС_" + ft)
+		}
 		return Type("ҚҰРЫЛЫМ_" + ft)
 	}
 }
+
+func (tc *TypeChecker) satisfiesInterface(structType Type, interfaceType Type) bool {
+	if !strings.HasPrefix(string(structType), "ҚҰРЫЛЫМ_") || !strings.HasPrefix(string(interfaceType), "ИНТЕРФЕЙС_") {
+		return false
+	}
+	structName := string(structType)[len("ҚҰРЫЛЫМ_"):]
+	interfaceName := string(interfaceType)[len("ИНТЕРФЕЙС_"):]
+
+	interf, ok := tc.interfaces[interfaceName]
+	if !ok {
+		return false
+	}
+
+	for _, method := range interf.Methods {
+		funcName := structName + "." + method.Name
+		sig, ok := tc.funcs[funcName]
+		if !ok {
+			return false
+		}
+		
+		// Сравниваем параметры. В структуре первый параметр — өзі (тип structType)
+		expectedParamsCount := len(method.Parameters) + 1
+		if len(sig.ParamTypes) != expectedParamsCount {
+			return false
+		}
+		
+		// Первый параметр должен быть типом структуры
+		if sig.ParamTypes[0] != structType {
+			return false
+		}
+		
+		// Остальные параметры должны совпадать
+		for i, pTypeStr := range method.Parameters {
+			expectedType := tc.fieldTypeToType(pTypeStr)
+			if sig.ParamTypes[i+1] != expectedType {
+				return false
+			}
+		}
+
+		// Возвращаемый тип должен совпадать
+		expectedRet := tc.fieldTypeToType(method.ReturnType)
+		if method.ReturnType == "" {
+			expectedRet = VOID_TYPE
+		}
+		if sig.ReturnType != expectedRet {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (tc *TypeChecker) SatisfiesInterface(structType Type, interfaceType Type) bool {
+	return tc.satisfiesInterface(structType, interfaceType)
+}
+
+func (tc *TypeChecker) FieldTypeToType(ft string) Type {
+	return tc.fieldTypeToType(ft)
+}
+
 
 // ---------------------------------------------------------------------------
 // Function registration (first pass)
 // ---------------------------------------------------------------------------
 
 func (tc *TypeChecker) registerFunction(fs *parser.FunctionStatement, env *TypeEnv) {
+	env.Set(fs.Name, VOID_TYPE)
+	if _, exists := tc.funcs[fs.Name]; exists {
+		return
+	}
 	paramTypes := make([]Type, len(fs.Parameters))
 	for i := range fs.Parameters {
 		paramTypes[i] = UNKNOWN // inferred later
@@ -685,5 +1286,4 @@ func (tc *TypeChecker) registerFunction(fs *parser.FunctionStatement, env *TypeE
 		ReturnType: UNKNOWN, // inferred from body
 	}
 	tc.funcs[fs.Name] = sig
-	env.Set(fs.Name, VOID_TYPE)
 }

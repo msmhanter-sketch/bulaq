@@ -19,7 +19,7 @@ all: build
 
 build:
 	@echo "🔧 Building Butaq Compiler..."
-	go build -o $(TARGET_BINARY) main.go
+	go build -o $(TARGET_BINARY) .
 	@echo "✅ Built: ./$(TARGET_BINARY)"
 
 test:

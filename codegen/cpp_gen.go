@@ -45,6 +45,7 @@ type CppGenerator struct { // kept name for backward compat with main.go
 
 	// Variable type tracking: true = string/ptr, false = float/number
 	varIsString map[string]bool
+	varIsBool   map[string]bool
 
 	// Function context
 	currentFunc  string
@@ -57,9 +58,15 @@ type CppGenerator struct { // kept name for backward compat with main.go
 	// Known structs from typechecker
 	structs map[string]*parser.StructStatement
 
+	// Known interfaces from typechecker
+	interfaces map[string]*parser.InterfaceStatement
+
 	// Loop label stacks for break and continue
 	loopStartLabels []string
 	loopEndLabels   []string
+
+	// Global variables declared at top-level
+	globals map[string]bool
 }
 
 func New(env *typechecker.TypeEnv) *CppGenerator {
@@ -73,17 +80,117 @@ func NewWithTC(env *typechecker.TypeEnv, tc *typechecker.TypeChecker, platform P
 		platform:     platform,
 		varOffsets:   make(map[string]int),
 		varIsString:  make(map[string]bool),
+		varIsBool:    make(map[string]bool),
 		funcParams:   make(map[string][]string),
 		funcParamOff: make(map[string]map[string]int),
+		globals:      make(map[string]bool),
 	}
 	if tc != nil {
 		cg.funcs = tc.GetFuncs()
 		cg.structs = tc.GetStructs()
+		cg.interfaces = tc.GetInterfaces()
 	} else {
 		cg.funcs = make(map[string]*typechecker.FuncSig)
 		cg.structs = make(map[string]*parser.StructStatement)
+		cg.interfaces = make(map[string]*parser.InterfaceStatement)
 	}
 	return cg
+}
+
+// builtinFuncMap maps Kazakh builtin names -> C runtime function names.
+// Functions NOT in this map are called directly by their Kazakh label (user functions).
+var builtinFuncMap = map[string]string{
+	// ── String utilities ───────────────────────────────────────────────
+	"мәтін_бөлу":       "builtin_str_split_get",
+	"мәтін_бөлу_саны":  "builtin_str_split_count",
+	"мәтін_ауыстыру":   "builtin_str_replace",
+	"мәтін_кіші":       "builtin_str_lower",
+	"мәтін_жоғары":     "builtin_str_upper",
+	"мәтін_қысқарту":   "builtin_str_trim",
+	"мәтін_кесу":       "builtin_str_slice",
+	"мәтін_басталады":  "builtin_str_starts_with",
+	"мәтін_аяқталады":  "builtin_str_ends_with",
+	"мәтін_іздеу":      "builtin_str_index_of",
+	// ── Extended math ──────────────────────────────────────────────────
+	"абс":         "builtin_math_abs",
+	"еден":        "builtin_math_floor",
+	"төбе":        "builtin_math_ceil",
+	"логарифм":    "builtin_math_log",
+	"логарифм2":   "builtin_math_log2",
+	"логарифм10":  "builtin_math_log10",
+	"ең_кіші":     "builtin_math_min",
+	"ең_үлкен":    "builtin_math_max",
+	"дөңгелек":    "builtin_math_round",
+	"тангенс":     "builtin_math_tan",
+	"арктангенс":  "builtin_math_atan",
+	"арктангенс2": "builtin_math_atan2",
+
+	"дәреже":    "builtin_pow",
+	"синус":     "builtin_sin",
+	"косинус":   "builtin_cos",
+	"кездейсоқ": "builtin_rand_float",
+	// ── Existing builtins already named correctly in C ──────────────────
+	"мәтін":          "builtin_num_to_str",
+	"сан":            "builtin_str_to_num",
+	"түбір":          "builtin_sqrt",
+	"пи":             "builtin_math_pi",
+	"экспонента":     "builtin_math_exp",
+	"жүйе":           "builtin_system",
+	"файл_жою":       "builtin_file_delete",
+	"файл_бар_ма":    "builtin_file_exists",
+	"аргумент_саны":  "builtin_args_count",
+	"аргумент":       "builtin_arg_get",
+	"мәтін_ұзындығы": "builtin_utf8_str_len",
+	"таңба":          "builtin_utf8_char_at",
+	"уақыт":          "builtin_time_seconds",
+	"уақыт_мәтіні":    "builtin_time_str",
+	"ұйықтау":       "builtin_sleep_seconds",
+	"жүйе_шығысы":    "builtin_exec_output",
+	"мд5":           "builtin_md5",
+	"ша256":          "builtin_sha256",
+	"б64_кодтау":    "builtin_base64_encode",
+	"б64_декодтау":   "builtin_base64_decode",
+	"жсон_оқу":       "builtin_json_parse",
+	"жсон_жазу":      "builtin_json_write",
+	"жсон_сан_алу":    "builtin_json_get_number",
+	"жсон_мәтін_алу":  "builtin_json_get_string",
+	"жсон_логика_алу": "builtin_json_get_bool",
+	"жсон_нысан_алу":  "builtin_json_get_object",
+	"жсон_тізім_алу":  "builtin_json_get_list",
+	"жсон_тізім_өлшемі": "builtin_json_list_size",
+	"жсон_тізім_элементі": "builtin_json_list_get",
+	"жсон_жаңа":       "builtin_json_create",
+	"жсон_сан_қосу":   "builtin_json_add_number",
+	"жсон_мәтін_қосу": "builtin_json_add_string",
+	"жсон_логика_қосу": "builtin_json_add_bool",
+	"жсон_нысан_қосу": "builtin_json_add_object",
+	"жсон_тізім_қосу": "builtin_json_add_list",
+	"ағын_күту":      "builtin_thread_join",
+	"кіру":           "builtin_input",
+
+	// ── Map / Dictionary ───────────────────────────────────────────────
+	"сөздік_жаңа":      "builtin_map_create",
+	"сөздік_сан_қою":   "builtin_map_set_number",
+	"сөздік_мәтін_қою": "builtin_map_set_string",
+	"сөздік_сан_алу":   "builtin_map_get_number",
+	"сөздік_мәтін_алу": "builtin_map_get_string",
+	"сөздік_бар_ма":    "builtin_map_has_key",
+	"сөздік_жою":       "builtin_map_delete_key",
+	"сөздік_өлшемі":    "builtin_map_size",
+
+	// ── Mutex / Synchronization ─────────────────────────────────────────
+	"мьютекс_жаңа":     "builtin_mutex_create",
+	"мьютекс_бекіту":   "builtin_mutex_lock",
+	"мьютекс_босату":   "builtin_mutex_unlock",
+	"мьютекс_жою":      "builtin_mutex_destroy",
+
+	// ── StringBuilder ───────────────────────────────────────────────────
+	"мәтін_жинақтаушы_жаңа":       "builtin_string_builder_create",
+	"мәтін_жинақтаушы_қосу_мәтін": "builtin_string_builder_append_string",
+	"мәтін_жинақтаушы_қосу_сан":   "builtin_string_builder_append_number",
+	"мәтін_жинақтаушы_қосу_таңба": "builtin_string_builder_append_char",
+	"мәтін_жинақтаушы_жазу":       "builtin_string_builder_to_string",
+	"мәтін_жинақтаушы_жою":       "builtin_string_builder_destroy",
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +214,8 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		cg.textSec.WriteString("    extern strcpy\n")
 		cg.textSec.WriteString("    extern malloc\n")
 		cg.textSec.WriteString("    extern free\n")
+		cg.textSec.WriteString("    extern calloc\n")
+		cg.textSec.WriteString("    extern strdup\n")
 		cg.textSec.WriteString("    extern sprintf\n")
 		cg.textSec.WriteString("    extern fopen\n")
 		cg.textSec.WriteString("    extern fclose\n")
@@ -118,7 +227,22 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		cg.textSec.WriteString("    extern scanf\n")
 		cg.textSec.WriteString("    extern rand\n")
 		cg.textSec.WriteString("    extern SetConsoleOutputCP\n")
-		cg.textSec.WriteString("    extern ExitProcess\n\n")
+		cg.textSec.WriteString("    extern _runtime_clock\n")
+		cg.textSec.WriteString("    extern ExitProcess\n")
+		cg.textSec.WriteString("    extern _thread_spawn\n")
+		cg.textSec.WriteString("    extern builtin_init_args\n")
+		cg.textSec.WriteString("    extern builtin_result_ok_num\n")
+		cg.textSec.WriteString("    extern builtin_result_ok_ptr\n")
+		cg.textSec.WriteString("    extern builtin_result_err\n")
+		cg.textSec.WriteString("    extern builtin_result_is_error\n")
+		cg.textSec.WriteString("    extern builtin_result_get_num\n")
+		cg.textSec.WriteString("    extern builtin_result_get_ptr\n")
+		cg.textSec.WriteString("    extern builtin_result_get_err\n")
+		// Builtin runtime functions
+		for _, cName := range builtinFuncMap {
+			cg.textSec.WriteString("    extern " + cName + "\n")
+		}
+		cg.textSec.WriteString("\n")
 	}
 
 	// Built-in string constants
@@ -133,6 +257,8 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 	cg.dataSec.WriteString("    err_null  db \"Қате: бос сілтемеге (null) жүгіну!\", 0\n")
 	cg.dataSec.WriteString("    err_div0  db \"Қате: нөлге бөлуге болмайды!\", 0\n")
 	cg.dataSec.WriteString("    err_bounds db \"Қате: жиын/тізім шекарасынан шығу!\", 0\n")
+	cg.dataSec.WriteString("    str_true_val  db \"ақиқат\", 0\n")
+	cg.dataSec.WriteString("    str_false_val db \"жалған\", 0\n")
 	// Static 64KB scratch buffer for string concat / file read
 	cg.bssSec.WriteString("    scratch_buf resb 65536\n")
 	cg.bssSec.WriteString("    input_buf   resb 4096\n") // кіру: stdin line buffer
@@ -146,6 +272,23 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 			cg.genFunctionDef(fs)
 		} else {
 			mainStmts = append(mainStmts, stmt)
+		}
+	}
+
+	// Generate static vtables for interfaces
+	if cg.tc != nil {
+		for _, structDef := range cg.structs {
+			structType := typechecker.Type("ҚҰРЫЛЫМ_" + structDef.Name)
+			for _, interfaceDef := range cg.interfaces {
+				interfaceType := typechecker.Type("ИНТЕРФЕЙС_" + interfaceDef.Name)
+				if cg.tc.SatisfiesInterface(structType, interfaceType) {
+					cg.dataSec.WriteString(fmt.Sprintf("vtable_%s_%s:\n", structDef.Name, interfaceDef.Name))
+					for _, method := range interfaceDef.Methods {
+						funcLabel := fmt.Sprintf("%s_%s", structDef.Name, method.Name)
+						cg.dataSec.WriteString(fmt.Sprintf("    dq %s\n", funcLabel))
+					}
+				}
+			}
 		}
 	}
 
@@ -169,6 +312,15 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 	cg.textSec.WriteString("    mov rbp, rsp\n")
 	if stackSize > 0 {
 		cg.textSec.WriteString(fmt.Sprintf("    sub rsp, %d\n", stackSize))
+	}
+	if cg.platform == PlatformLinux {
+		cg.textSec.WriteString("    mov rdi, [rbp+8]\n")
+		cg.textSec.WriteString("    lea rsi, [rbp+16]\n")
+		cg.textSec.WriteString("    call builtin_init_args\n")
+	} else {
+		cg.textSec.WriteString("    sub rsp, 32\n")
+		cg.textSec.WriteString("    call builtin_init_args\n")
+		cg.textSec.WriteString("    add rsp, 32\n")
 	}
 
 	for _, stmt := range mainStmts {
@@ -207,6 +359,8 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		out.WriteString("    extern strcpy\n")
 		out.WriteString("    extern malloc\n")
 		out.WriteString("    extern free\n")
+		out.WriteString("    extern calloc\n")
+		out.WriteString("    extern strdup\n")
 		out.WriteString("    extern sprintf\n")
 		out.WriteString("    extern fopen\n")
 		out.WriteString("    extern fclose\n")
@@ -215,7 +369,22 @@ func (cg *CppGenerator) Generate(program *parser.Program) string {
 		out.WriteString("    extern fseek\n")
 		out.WriteString("    extern ftell\n")
 		out.WriteString("    extern rand\n")
-		out.WriteString("    extern scanf\n\n")
+		out.WriteString("    extern _runtime_clock\n")
+		out.WriteString("    extern scanf\n")
+		out.WriteString("    extern _thread_spawn\n")
+		out.WriteString("    extern builtin_init_args\n")
+		out.WriteString("    extern builtin_result_ok_num\n")
+		out.WriteString("    extern builtin_result_ok_ptr\n")
+		out.WriteString("    extern builtin_result_err\n")
+		out.WriteString("    extern builtin_result_is_error\n")
+		out.WriteString("    extern builtin_result_get_num\n")
+		out.WriteString("    extern builtin_result_get_ptr\n")
+		out.WriteString("    extern builtin_result_get_err\n")
+		// Builtin runtime functions
+		for _, cName := range builtinFuncMap {
+			out.WriteString("    extern " + cName + "\n")
+		}
+		out.WriteString("\n")
 	}
 
 	// Generate runtime error helpers
@@ -307,23 +476,109 @@ func (cg *CppGenerator) countVars(stmts []parser.Statement) int {
 
 func (cg *CppGenerator) collectUniqueVarNames(stmts []parser.Statement, seen map[string]bool) {
 	for _, stmt := range stmts {
-		switch s := stmt.(type) {
-		case *parser.VarAssignStatement:
-			seen[s.Name.Value] = true
-		case *parser.IfStatement:
-			if s.Consequence != nil {
-				cg.collectUniqueVarNames(s.Consequence.Statements, seen)
-			}
-			if s.Alternative != nil {
-				cg.collectUniqueVarNames(s.Alternative.Statements, seen)
-			}
-		case *parser.WhileStatement:
-			if s.Body != nil {
-				cg.collectUniqueVarNames(s.Body.Statements, seen)
-			}
-		}
+		cg.collectFromStmt(stmt, seen)
 	}
 }
+
+func (cg *CppGenerator) collectFromStmt(stmt parser.Statement, seen map[string]bool) {
+	if stmt == nil {
+		return
+	}
+	switch s := stmt.(type) {
+	case *parser.BlockStatement:
+		cg.collectUniqueVarNames(s.Statements, seen)
+	case *parser.VarAssignStatement:
+		seen[s.Name.Value] = true
+		cg.collectFromExpr(s.Value, seen)
+	case *parser.StructFieldAssignStatement:
+		cg.collectFromExpr(s.Value, seen)
+	case *parser.IndexAssignStatement:
+		cg.collectFromExpr(s.Index, seen)
+		cg.collectFromExpr(s.Value, seen)
+	case *parser.FreeStatement:
+		cg.collectFromExpr(s.Value, seen)
+	case *parser.PrintStatement:
+		cg.collectFromExpr(s.Value, seen)
+	case *parser.IfStatement:
+		cg.collectFromExpr(s.Condition, seen)
+		if s.Consequence != nil {
+			cg.collectUniqueVarNames(s.Consequence.Statements, seen)
+		}
+		if s.Alternative != nil {
+			cg.collectUniqueVarNames(s.Alternative.Statements, seen)
+		}
+	case *parser.WhileStatement:
+		cg.collectFromExpr(s.Condition, seen)
+		if s.Body != nil {
+			cg.collectUniqueVarNames(s.Body.Statements, seen)
+		}
+	case *parser.ReturnStatement:
+		cg.collectFromExpr(s.Value, seen)
+	case *parser.CallStatement:
+		cg.collectFromExpr(s.Call, seen)
+	case *parser.ExpressionStatement:
+		cg.collectFromExpr(s.Expression, seen)
+	case *parser.ThreadStatement:
+		cg.collectFromStmt(s.Body, seen)
+	case *parser.FileWriteStatement:
+		cg.collectFromExpr(s.Path, seen)
+		cg.collectFromExpr(s.Content, seen)
+	}
+}
+
+func (cg *CppGenerator) collectFromExpr(expr parser.Expression, seen map[string]bool) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *parser.TryErrorExpression:
+		seen[e.VarName] = true
+		cg.collectFromExpr(e.Left, seen)
+		if e.Block != nil {
+			cg.collectUniqueVarNames(e.Block.Statements, seen)
+		}
+	case *parser.PostfixExpression:
+		cg.collectFromExpr(e.Left, seen)
+		cg.collectFromExpr(e.Right, seen)
+	case *parser.UnaryExpression:
+		cg.collectFromExpr(e.Right, seen)
+	case *parser.CallExpression:
+		for _, arg := range e.Arguments {
+			cg.collectFromExpr(arg, seen)
+		}
+	case *parser.StructFieldAccessExpression:
+		cg.collectFromExpr(e.Target, seen)
+	case *parser.ArrayLiteral:
+		for _, el := range e.Elements {
+			cg.collectFromExpr(el, seen)
+		}
+	case *parser.IndexExpression:
+		cg.collectFromExpr(e.Left, seen)
+		cg.collectFromExpr(e.Index, seen)
+	case *parser.LengthExpression:
+		cg.collectFromExpr(e.Value, seen)
+	case *parser.CharAtExpression:
+		cg.collectFromExpr(e.Str, seen)
+		cg.collectFromExpr(e.Index, seen)
+	case *parser.StrConcatExpression:
+		cg.collectFromExpr(e.Left, seen)
+		cg.collectFromExpr(e.Right, seen)
+	case *parser.StrLenExpression:
+		cg.collectFromExpr(e.Value, seen)
+	case *parser.StrEqExpression:
+		cg.collectFromExpr(e.Left, seen)
+		cg.collectFromExpr(e.Right, seen)
+	case *parser.ToStrExpression:
+		cg.collectFromExpr(e.Value, seen)
+	case *parser.CharCodeExpression:
+		cg.collectFromExpr(e.Value, seen)
+	case *parser.FileReadExpression:
+		cg.collectFromExpr(e.Path, seen)
+	case *parser.ErrorLiteral:
+		cg.collectFromExpr(e.Message, seen)
+	}
+}
+
 
 func alignTo16(n int) int {
 	if n == 0 {
@@ -333,6 +588,13 @@ func alignTo16(n int) int {
 }
 
 func (cg *CppGenerator) allocVar(name string) int {
+	if cg.currentFunc == "" {
+		if !cg.globals[name] {
+			cg.globals[name] = true
+			cg.bssSec.WriteString(fmt.Sprintf("    global_var_%s resq 1\n", name))
+		}
+		return 0
+	}
 	if off, ok := cg.varOffsets[name]; ok {
 		return off
 	}
@@ -342,8 +604,18 @@ func (cg *CppGenerator) allocVar(name string) int {
 }
 
 func (cg *CppGenerator) getVarOffset(name string) (int, bool) {
+	if cg.globals[name] {
+		return 0, true
+	}
 	off, ok := cg.varOffsets[name]
 	return off, ok
+}
+
+func (cg *CppGenerator) varRef(name string, off int) string {
+	if cg.globals[name] {
+		return fmt.Sprintf("[global_var_%s]", name)
+	}
+	return fmt.Sprintf("[rbp%+d]", off)
 }
 
 // ---------------------------------------------------------------------------
@@ -408,9 +680,58 @@ func (cg *CppGenerator) genStatement(node parser.Statement, sec *strings.Builder
 		}
 
 	case *parser.ReturnStatement:
-		cg.genExpression(n.Value, sec)
-		if cg.isStringExpr(n.Value) {
-			sec.WriteString("    movq xmm0, rax\n") // pass string pointer via xmm0
+		// Выясняем тип текущей функции
+		var retType typechecker.Type = typechecker.VOID_TYPE
+		if cg.currentFunc != "" {
+			if sig, ok := cg.funcs[cg.currentFunc]; ok {
+				retType = sig.ReturnType
+			}
+		}
+
+		if typechecker.IsResultType(retType) {
+			valType := cg.tc.Check(n.Value, cg.env)
+			if !typechecker.IsResultType(valType) {
+				// Функция возвращает Result, но значение не является Result -> Оборачиваем!
+				underlying := typechecker.GetResultUnderlyingType(retType)
+				cg.genExpressionCoerced(n.Value, underlying, sec)
+				if underlying == typechecker.NUMBER_TYPE || underlying == typechecker.INT_TYPE || underlying == typechecker.BYTE_TYPE || underlying == typechecker.BOOL_TYPE {
+					// Числовые типы: приводим к double в xmm0, если нужно
+					if valType == typechecker.BOOL_TYPE || valType == typechecker.INT_TYPE || valType == typechecker.BYTE_TYPE {
+						sec.WriteString("    cvtsi2sd xmm0, rax\n")
+					}
+					// Вызываем builtin_result_ok_num
+					if cg.platform == PlatformWindows {
+						sec.WriteString("    sub rsp, 32\n")
+						sec.WriteString("    call builtin_result_ok_num\n")
+						sec.WriteString("    add rsp, 32\n")
+					} else {
+						sec.WriteString("    call builtin_result_ok_num\n")
+					}
+				} else {
+					// Указатели: передаем rax
+					if cg.platform == PlatformWindows {
+						sec.WriteString("    mov rcx, rax\n")
+						sec.WriteString("    sub rsp, 32\n")
+						sec.WriteString("    call builtin_result_ok_ptr\n")
+						sec.WriteString("    add rsp, 32\n")
+					} else {
+						sec.WriteString("    mov rdi, rax\n")
+						sec.WriteString("    call builtin_result_ok_ptr\n")
+					}
+				}
+				// Результат (указатель ResultObject) в rax. Дублируем его в xmm0.
+				sec.WriteString("    movq xmm0, rax\n")
+			} else {
+				// Значение уже является Result
+				cg.genExpression(n.Value, sec)
+				sec.WriteString("    movq xmm0, rax\n")
+			}
+		} else {
+			// Обычный возврат для не-Result функций
+			cg.genExpressionCoerced(n.Value, retType, sec)
+			if cg.isStringExpr(n.Value) || strings.HasPrefix(string(retType), "ИНТЕРФЕЙС_") {
+				sec.WriteString("    movq xmm0, rax\n") // pass string/interface pointer via xmm0
+			}
 		}
 		sec.WriteString("    ; қайтару\n")
 		sec.WriteString("    mov rsp, rbp\n")
@@ -426,7 +747,7 @@ func (cg *CppGenerator) genStatement(node parser.Statement, sec *strings.Builder
 			sec.WriteString(fmt.Sprintf("    ; ERROR: undeclared array '%s'\n", n.Array.Value))
 			return
 		}
-		sec.WriteString(fmt.Sprintf("    mov r12, [rbp%+d]\n", off)) // r12 = array ptr
+		sec.WriteString(fmt.Sprintf("    mov r12, %s\n", cg.varRef(n.Array.Value, off))) // r12 = array ptr
 		sec.WriteString("    cmp r12, 0\n")
 		sec.WriteString("    je _runtime_null_pointer_error\n")
 		// Evaluate index into r13 (int)
@@ -504,7 +825,7 @@ func (cg *CppGenerator) genStatement(node parser.Statement, sec *strings.Builder
 
 			// Evaluate value
 			cg.genExpression(n.Value, sec)
-			sec.WriteString(fmt.Sprintf("    mov r12, [rbp%+d]\n", off))
+			sec.WriteString(fmt.Sprintf("    mov r12, %s\n", cg.varRef(n.StructName, off)))
 		}
 		sec.WriteString("    cmp r12, 0\n")
 		sec.WriteString("    je _runtime_null_pointer_error\n")
@@ -562,8 +883,6 @@ func (cg *CppGenerator) genStatement(node parser.Statement, sec *strings.Builder
 
 func (cg *CppGenerator) genVarAssign(n *parser.VarAssignStatement, sec *strings.Builder) {
 	sec.WriteString(fmt.Sprintf("    ; %s болсын\n", n.Name.Value))
-	cg.genExpression(n.Value, sec)
-	off := cg.allocVar(n.Name.Value)
 
 	exprType := cg.tc.Check(n.Value, cg.env)
 	existingType, ok := cg.env.Get(n.Name.Value)
@@ -572,41 +891,45 @@ func (cg *CppGenerator) genVarAssign(n *parser.VarAssignStatement, sec *strings.
 		existingType = exprType
 	}
 
-	// Strings, bools, arrays and structs live in rax (pointers or bools); numbers/floats in xmm0.
-	// We use the existing declared variable type to decide which register to save.
-	if existingType == typechecker.STRING_TYPE || existingType == typechecker.ARRAY_TYPE || strings.HasPrefix(string(existingType), "ҚҰРЫЛЫМ_") {
-		sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
+	cg.genExpressionCoerced(n.Value, existingType, sec)
+	off := cg.allocVar(n.Name.Value)
+
+	ref := cg.varRef(n.Name.Value, off)
+	if existingType == typechecker.STRING_TYPE || existingType == typechecker.ARRAY_TYPE || existingType == typechecker.JSON_TYPE || strings.HasPrefix(string(existingType), "ҚҰРЫЛЫМ_") || strings.HasPrefix(string(existingType), "ИНТЕРФЕЙС_") {
+		sec.WriteString(fmt.Sprintf("    mov %s, rax\n", ref))
 		cg.varIsString[n.Name.Value] = true
 	} else if existingType == typechecker.NUMBER_TYPE || existingType == typechecker.INT_TYPE || existingType == typechecker.BOOL_TYPE {
-		// Bool, int or float
 		if existingType == typechecker.BOOL_TYPE {
-			sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
-			cg.varIsString[n.Name.Value] = true
+			sec.WriteString(fmt.Sprintf("    mov %s, rax\n", ref))
+			cg.varIsBool[n.Name.Value] = true
+			cg.varIsString[n.Name.Value] = false
 		} else {
-			sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
+			sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", ref))
 			cg.varIsString[n.Name.Value] = false
 		}
 	} else {
-		// Fallback switch on value expression type
 		switch n.Value.(type) {
 		case *parser.StringLiteral, *parser.StrConcatExpression,
 			*parser.StrEqExpression,
 			*parser.ToStrExpression, *parser.CharAtExpression,
-			*parser.BoolLiteral,
 			*parser.FileReadExpression,
 			*parser.ArrayLiteral:
-			sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
+			sec.WriteString(fmt.Sprintf("    mov %s, rax\n", ref))
 			cg.varIsString[n.Name.Value] = true
+		case *parser.BoolLiteral:
+			sec.WriteString(fmt.Sprintf("    mov %s, rax\n", ref))
+			cg.varIsBool[n.Name.Value] = true
+			cg.varIsString[n.Name.Value] = false
 		case *parser.NumberLiteral, *parser.PostfixExpression, *parser.CharCodeExpression,
 			*parser.StrLenExpression, *parser.LengthExpression:
-			sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
+			sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", ref))
 			cg.varIsString[n.Name.Value] = false
 		default:
-			if exprType == typechecker.STRING_TYPE || exprType == typechecker.ARRAY_TYPE || strings.HasPrefix(string(exprType), "ҚҰРЫЛЫМ_") || cg.isStringExpr(n.Value) {
-				sec.WriteString(fmt.Sprintf("    mov [rbp%+d], rax\n", off))
+			if exprType == typechecker.STRING_TYPE || exprType == typechecker.ARRAY_TYPE || exprType == typechecker.JSON_TYPE || strings.HasPrefix(string(exprType), "ҚҰРЫЛЫМ_") || strings.HasPrefix(string(exprType), "ИНТЕРФЕЙС_") || cg.isStringExpr(n.Value) {
+				sec.WriteString(fmt.Sprintf("    mov %s, rax\n", ref))
 				cg.varIsString[n.Name.Value] = true
 			} else {
-				sec.WriteString(fmt.Sprintf("    movsd [rbp%+d], xmm0\n", off))
+				sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", ref))
 				cg.varIsString[n.Name.Value] = false
 			}
 		}
@@ -621,13 +944,19 @@ func (cg *CppGenerator) isStringExpr(e parser.Expression) bool {
 	switch val := e.(type) {
 	case *parser.StringLiteral, *parser.StrConcatExpression,
 		*parser.ToStrExpression, *parser.CharAtExpression,
-		*parser.FileReadExpression, *parser.InputExpression:
+		*parser.FileReadExpression, *parser.InputExpression,
+		*parser.ErrorLiteral, *parser.TryErrorExpression:
 		return true
 	case *parser.Identifier:
+		if t, ok := cg.env.Get(val.Value); ok {
+			if typechecker.IsResultType(t) || strings.HasPrefix(string(t), "ИНТЕРФЕЙС_") {
+				return true
+			}
+		}
 		return cg.varIsString[val.Value]
 	case *parser.CallExpression:
 		if sig, ok := cg.funcs[val.Function]; ok {
-			return sig.ReturnType == typechecker.STRING_TYPE || sig.ReturnType == typechecker.ARRAY_TYPE || strings.HasPrefix(string(sig.ReturnType), "ҚҰРЫЛЫМ_")
+			return sig.ReturnType == typechecker.STRING_TYPE || sig.ReturnType == typechecker.ARRAY_TYPE || sig.ReturnType == typechecker.JSON_TYPE || strings.HasPrefix(string(sig.ReturnType), "ҚҰРЫЛЫМ_") || strings.HasPrefix(string(sig.ReturnType), "ИНТЕРФЕЙС_") || typechecker.IsResultType(sig.ReturnType)
 		}
 	case *parser.StructFieldAccessExpression:
 		t, ok := cg.env.Get(val.StructName)
@@ -656,12 +985,65 @@ func (cg *CppGenerator) isStringExpr(e parser.Expression) bool {
 			}
 			return lastFieldType == "МӘТІН" || lastFieldType == "ТІЗІМ" || (lastFieldType != "САН" && lastFieldType != "БҮТІН" && lastFieldType != "АҚИҚАТ" && lastFieldType != "БАЙТ")
 		}
+	default:
+		exprType := cg.tc.Check(e, cg.env)
+		if typechecker.IsResultType(exprType) || strings.HasPrefix(string(exprType), "ИНТЕРФЕЙС_") {
+			return true
+		}
 	}
 	return false
 }
 
+func (cg *CppGenerator) genExpressionCoerced(expr parser.Expression, expectedType typechecker.Type, sec *strings.Builder) {
+	exprType := cg.tc.Check(expr, cg.env)
+	if strings.HasPrefix(string(expectedType), "ИНТЕРФЕЙС_") && strings.HasPrefix(string(exprType), "ҚҰРЫЛЫМ_") {
+		structName := string(exprType)[len("ҚҰРЫЛЫМ_"):]
+		interfaceName := string(expectedType)[len("ИНТЕРФЕЙС_"):]
+
+		cg.genExpression(expr, sec)
+
+		sec.WriteString("    push rax\n")
+		sec.WriteString("    sub rsp, 8             ; align stack\n")
+
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    mov rcx, 16\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call malloc\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    mov rdi, 16\n")
+			sec.WriteString("    call malloc\n")
+		}
+
+		sec.WriteString("    mov r12, [rsp+8]       ; restore struct ptr\n")
+		sec.WriteString("    mov [rax], r12\n")
+
+		vtableName := fmt.Sprintf("vtable_%s_%s", structName, interfaceName)
+		sec.WriteString(fmt.Sprintf("    lea r13, [%s]\n", vtableName))
+		sec.WriteString("    mov [rax+8], r13\n")
+
+		sec.WriteString("    add rsp, 16\n")
+		sec.WriteString("    movq xmm0, rax\n")
+	} else {
+		cg.genExpression(expr, sec)
+	}
+}
+
 func (cg *CppGenerator) genPrint(n *parser.PrintStatement, sec *strings.Builder) {
 	sec.WriteString("    ; жазу\n")
+
+	exprType := cg.tc.Check(n.Value, cg.env)
+	if exprType == typechecker.BOOL_TYPE {
+		cg.genExpression(n.Value, sec)
+		cg.genPrintBool(sec)
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    xor rcx, rcx\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call fflush\n")
+			sec.WriteString("    add rsp, 32\n")
+		}
+		return
+	}
 
 	if cg.isStringExpr(n.Value) {
 		// ---- Print a string-returning expression (rax = char*) ----
@@ -676,6 +1058,12 @@ func (cg *CppGenerator) genPrint(n *parser.PrintStatement, sec *strings.Builder)
 			sec.WriteString("    lea rcx, [fmt_str]\n")
 			sec.WriteString("    sub rsp, 32\n")
 			sec.WriteString("    call printf\n")
+			sec.WriteString("    add rsp, 32\n")
+		}
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    xor rcx, rcx\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call fflush\n")
 			sec.WriteString("    add rsp, 32\n")
 		}
 		return
@@ -718,9 +1106,10 @@ func (cg *CppGenerator) genPrint(n *parser.PrintStatement, sec *strings.Builder)
 			sec.WriteString(fmt.Sprintf("    ; ERROR: undeclared var %s\n", val.Value))
 			return
 		}
+		ref := cg.varRef(val.Value, off)
 		if cg.varIsString[val.Value] {
 			// String variable: load pointer from rax slot
-			sec.WriteString(fmt.Sprintf("    mov rax, [rbp%+d]\n", off))
+			sec.WriteString(fmt.Sprintf("    mov rax, %s\n", ref))
 			if cg.platform == PlatformLinux {
 				sec.WriteString("    mov rsi, rax\n")
 				sec.WriteString("    lea rdi, [fmt_str]\n")
@@ -735,12 +1124,12 @@ func (cg *CppGenerator) genPrint(n *parser.PrintStatement, sec *strings.Builder)
 			}
 		} else {
 			if cg.platform == PlatformLinux {
-				sec.WriteString(fmt.Sprintf("    movsd xmm0, [rbp%+d]\n", off))
+				sec.WriteString(fmt.Sprintf("    movsd xmm0, %s\n", ref))
 				sec.WriteString("    mov rdi, fmt_float\n")
 				sec.WriteString("    mov rax, 1\n")
 				sec.WriteString("    call printf\n")
 			} else {
-				sec.WriteString(fmt.Sprintf("    movsd xmm1, [rbp%+d]\n", off))
+				sec.WriteString(fmt.Sprintf("    movsd xmm1, %s\n", ref))
 				sec.WriteString("    movq rdx, xmm1\n")
 				sec.WriteString("    lea rcx, [fmt_float]\n")
 				sec.WriteString("    sub rsp, 32\n")
@@ -784,6 +1173,34 @@ func (cg *CppGenerator) genPrint(n *parser.PrintStatement, sec *strings.Builder)
 		sec.WriteString("    xor rcx, rcx\n")
 		sec.WriteString("    sub rsp, 32\n")
 		sec.WriteString("    call fflush\n")
+		sec.WriteString("    add rsp, 32\n")
+	}
+}
+
+func (cg *CppGenerator) genPrintBool(sec *strings.Builder) {
+	lblTrue := cg.newLabel("bool_true")
+	lblEnd := cg.newLabel("bool_end")
+	sec.WriteString("    cmp rax, 0\n")
+	sec.WriteString(fmt.Sprintf("    jne %s\n", lblTrue))
+	// False case:
+	sec.WriteString("    lea rax, [str_false_val]\n")
+	sec.WriteString(fmt.Sprintf("    jmp %s\n", lblEnd))
+	// True case:
+	sec.WriteString(fmt.Sprintf("%s:\n", lblTrue))
+	sec.WriteString("    lea rax, [str_true_val]\n")
+	// End:
+	sec.WriteString(fmt.Sprintf("%s:\n", lblEnd))
+
+	if cg.platform == PlatformLinux {
+		sec.WriteString("    mov rdi, fmt_str\n")
+		sec.WriteString("    mov rsi, rax\n")
+		sec.WriteString("    xor rax, rax\n")
+		sec.WriteString("    call printf\n")
+	} else {
+		sec.WriteString("    mov rdx, rax\n")
+		sec.WriteString("    lea rcx, [fmt_str]\n")
+		sec.WriteString("    sub rsp, 32\n")
+		sec.WriteString("    call printf\n")
 		sec.WriteString("    add rsp, 32\n")
 	}
 }
@@ -858,6 +1275,32 @@ func (cg *CppGenerator) genCondition(cond parser.Expression, sec *strings.Builde
 		return
 	}
 
+	leaf := cg.getLeafOperand(pe.Right)
+	if leaf != "" {
+		cg.genExpression(pe.Left, sec)
+		sec.WriteString(fmt.Sprintf("    comisd xmm0, %s\n", leaf))
+		switch pe.Operator {
+		case "үлкен": // xmm0 > leaf: jump to fail if <=
+			sec.WriteString(fmt.Sprintf("    jbe %s\n", failLabel))
+		case "кіші": // xmm0 < leaf: jump to fail if >=
+			sec.WriteString(fmt.Sprintf("    jae %s\n", failLabel))
+		case "тең": // xmm0 == leaf: jump to fail if !=
+			sec.WriteString(fmt.Sprintf("    jne %s\n", failLabel))
+		case "тең_емес": // xmm0 != leaf: jump to fail if ==
+			sec.WriteString(fmt.Sprintf("    je %s\n", failLabel))
+		case "үлкен_тең": // xmm0 >= leaf: jump to fail if <
+			sec.WriteString(fmt.Sprintf("    jb %s\n", failLabel))
+		case "кіші_тең": // xmm0 <= leaf: jump to fail if >
+			sec.WriteString(fmt.Sprintf("    ja %s\n", failLabel))
+		default:
+			// AND/OR/etc. fallback: evaluate as bool
+			cg.genExpression(cond, sec)
+			sec.WriteString("    test rax, rax\n")
+			sec.WriteString(fmt.Sprintf("    jz %s\n", failLabel))
+		}
+		return
+	}
+
 	// Evaluate left and right into xmm registers
 	cg.genExpression(pe.Left, sec)
 	sec.WriteString("    movsd xmm1, xmm0\n") // left in xmm1
@@ -900,9 +1343,124 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		sec.WriteString(fmt.Sprintf("    movsd xmm0, [%s]\n", label))
 
 	case *parser.IntLiteral:
-		// Temporary compatibility shim: evaluate into xmm0 as float for math ops.
-		sec.WriteString(fmt.Sprintf("    mov rax, %d\n", n.Value))
-		sec.WriteString("    cvtsi2sd xmm0, rax\n")
+		label := cg.newFloat(float64(n.Value))
+		sec.WriteString(fmt.Sprintf("    movsd xmm0, [%s]\n", label))
+
+	case *parser.ErrorLiteral:
+		cg.genExpression(n.Message, sec) // rax = char* error message
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    mov rcx, rax\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call builtin_result_err\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    mov rdi, rax\n")
+			sec.WriteString("    call builtin_result_err\n")
+		}
+		// rax = ResultObject*. Duplicate to xmm0.
+		sec.WriteString("    movq xmm0, rax\n")
+
+	case *parser.TryErrorExpression:
+		successLabel := cg.newLabel("try_ok")
+		endLabel := cg.newLabel("try_end")
+		leftType := cg.tc.Check(n.Left, cg.env)
+		underlying := typechecker.GetResultUnderlyingType(leftType)
+
+		// 1. Evaluate Left (result in rax)
+		cg.genExpression(n.Left, sec)
+		
+		// 2. Save Result pointer on stack and align to 16 bytes
+		sec.WriteString("    push rax\n")
+		sec.WriteString("    sub rsp, 8             ; align stack to 16 bytes\n")
+
+		// 3. Check if Result is error
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    mov rcx, rax\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call builtin_result_is_error\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    mov rdi, rax\n")
+			sec.WriteString("    call builtin_result_is_error\n")
+		}
+
+		// 4. Branch based on result (1 = error, 0 = success)
+		sec.WriteString("    cmp rax, 1\n")
+		sec.WriteString(fmt.Sprintf("    jne %s\n", successLabel))
+
+		// 5. Error branch:
+		// Retrieve error message: builtin_result_get_err(res)
+		sec.WriteString("    mov rax, [rsp+8]\n") // restore Result pointer from stack
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    mov rcx, rax\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call builtin_result_get_err\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    mov rdi, rax\n")
+			sec.WriteString("    call builtin_result_get_err\n")
+		}
+		// rax = char* error message. Save it to local variable n.VarName
+		off := cg.allocVar(n.VarName)
+		ref := cg.varRef(n.VarName, off)
+		cg.varIsString[n.VarName] = true
+		sec.WriteString(fmt.Sprintf("    mov %s, rax\n", ref))
+
+		// Execute error block statements
+		for _, stmt := range n.Block.Statements {
+			cg.genStatement(stmt, sec)
+		}
+
+		// Restore stack
+		sec.WriteString("    add rsp, 16\n")
+
+		// Sync result registers based on the underlying type
+		if underlying == typechecker.NUMBER_TYPE || underlying == typechecker.INT_TYPE || underlying == typechecker.BYTE_TYPE || underlying == typechecker.BOOL_TYPE {
+			if underlying == typechecker.BOOL_TYPE || underlying == typechecker.INT_TYPE || underlying == typechecker.BYTE_TYPE {
+				sec.WriteString("    cvttsd2si rax, xmm0\n")
+			}
+		} else {
+			sec.WriteString("    movq xmm0, rax\n")
+		}
+		sec.WriteString(fmt.Sprintf("    jmp %s\n", endLabel))
+
+		// 6. Success branch:
+		sec.WriteString(successLabel + ":\n")
+		sec.WriteString("    mov rax, [rsp+8]\n") // restore Result pointer from stack
+
+		if underlying == typechecker.NUMBER_TYPE || underlying == typechecker.INT_TYPE || underlying == typechecker.BYTE_TYPE || underlying == typechecker.BOOL_TYPE {
+			if cg.platform == PlatformWindows {
+				sec.WriteString("    mov rcx, rax\n")
+				sec.WriteString("    sub rsp, 32\n")
+				sec.WriteString("    call builtin_result_get_num\n")
+				sec.WriteString("    add rsp, 32\n")
+			} else {
+				sec.WriteString("    mov rdi, rax\n")
+				sec.WriteString("    call builtin_result_get_num\n")
+			}
+			// Result in xmm0.
+			if underlying == typechecker.BOOL_TYPE || underlying == typechecker.INT_TYPE || underlying == typechecker.BYTE_TYPE {
+				sec.WriteString("    cvttsd2si rax, xmm0\n")
+			}
+		} else {
+			if cg.platform == PlatformWindows {
+				sec.WriteString("    mov rcx, rax\n")
+				sec.WriteString("    sub rsp, 32\n")
+				sec.WriteString("    call builtin_result_get_ptr\n")
+				sec.WriteString("    add rsp, 32\n")
+			} else {
+				sec.WriteString("    mov rdi, rax\n")
+				sec.WriteString("    call builtin_result_get_ptr\n")
+			}
+			// Result in rax. Duplicate to xmm0.
+			sec.WriteString("    movq xmm0, rax\n")
+		}
+
+		// Restore stack
+		sec.WriteString("    add rsp, 16\n")
+
+		// 7. End label
+		sec.WriteString(endLabel + ":\n")
 
 	case *parser.StructCreateExpression:
 		structDef, ok := cg.structs[n.StructName]
@@ -947,7 +1505,7 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 				return
 			}
 			structName = string(t)[len("ҚҰРЫЛЫМ_"):]
-			sec.WriteString(fmt.Sprintf("    mov r12, [rbp%+d]\n", off))
+			sec.WriteString(fmt.Sprintf("    mov r12, %s\n", cg.varRef(n.StructName, off)))
 		}
 		parts := strings.Split(n.Field, ".")
 		sec.WriteString("    cmp r12, 0\n")
@@ -1001,9 +1559,10 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 			sec.WriteString(fmt.Sprintf("    ; ERROR: undeclared var '%s'\n", n.Value))
 			return
 		}
-		sec.WriteString(fmt.Sprintf("    movsd xmm0, [rbp%+d]\n", off))
+		ref := cg.varRef(n.Value, off)
+		sec.WriteString(fmt.Sprintf("    movsd xmm0, %s\n", ref))
 		// Also load as int in rax (for bool/int vars)
-		sec.WriteString(fmt.Sprintf("    mov rax, [rbp%+d]\n", off))
+		sec.WriteString(fmt.Sprintf("    mov rax, %s\n", ref))
 
 	case *parser.PostfixExpression:
 		cg.genBinaryOp(n, sec)
@@ -1275,6 +1834,76 @@ func (cg *CppGenerator) genExpression(node parser.Expression, sec *strings.Build
 		sec.WriteString("    movsd xmm0, [r12 + r13]\n")
 		// also load as rax for possible pointer use
 		sec.WriteString("    movq rax, xmm0\n")
+
+	case *parser.ThreadStatement:
+		threadID := cg.labelCount
+		cg.labelCount++
+		wrapperLabel := fmt.Sprintf("thread_wrapper_%d", threadID)
+
+		var bodyStmts []parser.Statement
+		if block, ok := n.Body.(*parser.BlockStatement); ok {
+			bodyStmts = block.Statements
+		} else {
+			bodyStmts = []parser.Statement{n.Body}
+		}
+
+		// Save state
+		outerOffsets := cg.varOffsets
+		outerOffset := cg.currentOffset
+		outerFunc := cg.currentFunc
+		outerIsString := cg.varIsString
+		outerEnv := cg.env
+
+		cg.varOffsets = make(map[string]int)
+		cg.currentOffset = 0
+		cg.currentFunc = wrapperLabel
+		cg.varIsString = make(map[string]bool)
+		cg.env = typechecker.NewEnclosedTypeEnv(cg.env)
+
+		cg.funcSec.WriteString(fmt.Sprintf("\n; thread wrapper %d\n", threadID))
+		cg.funcSec.WriteString(wrapperLabel + ":\n")
+		cg.funcSec.WriteString("    push rbp\n")
+		cg.funcSec.WriteString("    mov rbp, rsp\n")
+
+		stackSize := cg.calcStackSize(bodyStmts)
+		stackSize = alignTo16(stackSize)
+		if stackSize > 0 {
+			cg.funcSec.WriteString(fmt.Sprintf("    sub rsp, %d\n", stackSize))
+		}
+
+		for _, stmt := range bodyStmts {
+			cg.genStatement(stmt, &cg.funcSec)
+		}
+
+		// Thread wrapper return epilogue
+		cg.funcSec.WriteString("    xor rax, rax\n")
+		if stackSize > 0 {
+			cg.funcSec.WriteString(fmt.Sprintf("    add rsp, %d\n", stackSize))
+		}
+		cg.funcSec.WriteString("    pop rbp\n")
+		cg.funcSec.WriteString("    ret\n")
+
+		// Restore state
+		cg.varOffsets = outerOffsets
+		cg.currentOffset = outerOffset
+		cg.currentFunc = outerFunc
+		cg.varIsString = outerIsString
+		cg.env = outerEnv
+
+		// Call _thread_spawn
+		sec.WriteString("    ; spawn thread\n")
+		if cg.platform == PlatformWindows {
+			sec.WriteString(fmt.Sprintf("    lea rcx, [%s]\n", wrapperLabel))
+			sec.WriteString("    xor rdx, rdx\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call _thread_spawn\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString(fmt.Sprintf("    lea rdi, [%s]\n", wrapperLabel))
+			sec.WriteString("    xor rsi, rsi\n")
+			sec.WriteString("    call _thread_spawn\n")
+		}
+		sec.WriteString("    cvtsi2sd xmm0, rax\n")
 	}
 }
 
@@ -1383,30 +2012,33 @@ func (cg *CppGenerator) genFileRead(n *parser.FileReadExpression, sec *strings.B
 // "path" content файл_жазу
 func (cg *CppGenerator) genFileWrite(n *parser.FileWriteStatement, sec *strings.Builder) {
 	sec.WriteString("    ; файл_жазу\n")
-	// n.Path = file path, n.Content = data to write
+	// Evaluate path first, push it to stack
 	cg.genExpression(n.Path, sec)
-	sec.WriteString("    mov r10, rax\n") // r10 = path
+	sec.WriteString("    push rax\n")
+	// Evaluate content, push it to stack
 	cg.genExpression(n.Content, sec)
-	sec.WriteString("    mov r11, rax\n") // r11 = content
+	sec.WriteString("    push rax\n")
+
+	lblDone := cg.newLabel("fwrite_done")
 
 	if cg.platform == PlatformWindows {
 		// fopen(path, "w")
-		sec.WriteString("    mov rcx, r10\n")
+		sec.WriteString("    mov rcx, [rsp+8]\n")
 		sec.WriteString("    lea rdx, [file_w]\n")
 		sec.WriteString("    sub rsp, 32\n")
 		sec.WriteString("    call fopen\n")
 		sec.WriteString("    add rsp, 32\n")
 		sec.WriteString("    mov r14, rax\n") // r14 = FILE*
 		sec.WriteString("    test r14, r14\n")
-		sec.WriteString("    jz .fwrite_done\n")
-		// strlen(content) → r15 = length
-		sec.WriteString("    mov rcx, r11\n")
+		sec.WriteString(fmt.Sprintf("    jz %s\n", lblDone))
+		// strlen(content)
+		sec.WriteString("    mov rcx, [rsp]\n")
 		sec.WriteString("    sub rsp, 32\n")
 		sec.WriteString("    call strlen\n")
 		sec.WriteString("    add rsp, 32\n")
 		sec.WriteString("    mov r15, rax\n")
 		// fwrite(content, 1, len, FILE*)
-		sec.WriteString("    mov rcx, r11\n")
+		sec.WriteString("    mov rcx, [rsp]\n")
 		sec.WriteString("    mov rdx, 1\n")
 		sec.WriteString("    mov r8, r15\n")
 		sec.WriteString("    mov r9, r14\n")
@@ -1418,25 +2050,31 @@ func (cg *CppGenerator) genFileWrite(n *parser.FileWriteStatement, sec *strings.
 		sec.WriteString("    sub rsp, 32\n")
 		sec.WriteString("    call fclose\n")
 		sec.WriteString("    add rsp, 32\n")
-		sec.WriteString(".fwrite_done:\n")
+		sec.WriteString(fmt.Sprintf("%s:\n", lblDone))
+		sec.WriteString("    add rsp, 16\n")
 	} else {
-		sec.WriteString("    mov rdi, r10\n")
+		// Linux: System V ABI
+		sec.WriteString("    mov rdi, [rsp+8]\n")
 		sec.WriteString("    lea rsi, [file_w]\n")
 		sec.WriteString("    call fopen\n")
 		sec.WriteString("    mov r14, rax\n")
 		sec.WriteString("    test r14, r14\n")
-		sec.WriteString("    jz .fwrite_done\n")
-		sec.WriteString("    mov rdi, r11\n")
+		sec.WriteString(fmt.Sprintf("    jz %s\n", lblDone))
+		// strlen(content)
+		sec.WriteString("    mov rdi, [rsp]\n")
 		sec.WriteString("    call strlen\n")
 		sec.WriteString("    mov r15, rax\n")
-		sec.WriteString("    mov rdi, r11\n")
+		// fwrite(content, 1, len, FILE*)
+		sec.WriteString("    mov rdi, [rsp]\n")
 		sec.WriteString("    mov rsi, 1\n")
 		sec.WriteString("    mov rdx, r15\n")
 		sec.WriteString("    mov rcx, r14\n")
 		sec.WriteString("    call fwrite\n")
+		// fclose
 		sec.WriteString("    mov rdi, r14\n")
 		sec.WriteString("    call fclose\n")
-		sec.WriteString(".fwrite_done:\n")
+		sec.WriteString(fmt.Sprintf("%s:\n", lblDone))
+		sec.WriteString("    add rsp, 16\n")
 	}
 }
 
@@ -1444,15 +2082,134 @@ func (cg *CppGenerator) genFileWrite(n *parser.FileWriteStatement, sec *strings.
 // Binary operations
 // ---------------------------------------------------------------------------
 
+func isLeafExpression(e parser.Expression) bool {
+	switch e.(type) {
+	case *parser.NumberLiteral, *parser.IntLiteral, *parser.Identifier, *parser.BoolLiteral:
+		return true
+	}
+	return false
+}
+
+func (cg *CppGenerator) isSimpleExpression(e parser.Expression) bool {
+	switch n := e.(type) {
+	case *parser.BoolLiteral, *parser.IntLiteral, *parser.NumberLiteral, *parser.Identifier:
+		return true
+	case *parser.UnaryExpression:
+		return n.Operator == "емес" && cg.isSimpleExpression(n.Right)
+	}
+	return false
+}
+
+func (cg *CppGenerator) getLeafOperand(e parser.Expression) string {
+	switch n := e.(type) {
+	case *parser.NumberLiteral:
+		label := cg.newFloat(n.Value)
+		return fmt.Sprintf("[%s]", label)
+	case *parser.IntLiteral:
+		label := cg.newFloat(float64(n.Value))
+		return fmt.Sprintf("[%s]", label)
+	case *parser.Identifier:
+		off, ok := cg.getVarOffset(n.Value)
+		if !ok {
+			return ""
+		}
+		return cg.varRef(n.Value, off)
+	}
+	return ""
+}
+
+func (cg *CppGenerator) genSimpleExpression(e parser.Expression, reg string, sec *strings.Builder) {
+	isXmm := strings.HasPrefix(reg, "xmm")
+	if ue, ok := e.(*parser.UnaryExpression); ok && ue.Operator == "емес" {
+		if isXmm {
+			// For XMM: evaluate into rax, flip, then convert
+			cg.genSimpleExpression(ue.Right, "rax", sec)
+			sec.WriteString("    xor rax, 1\n")
+			sec.WriteString(fmt.Sprintf("    cvtsi2sd %s, rax\n", reg))
+		} else {
+			cg.genSimpleExpression(ue.Right, reg, sec)
+			sec.WriteString(fmt.Sprintf("    xor %s, 1\n", reg))
+		}
+		return
+	}
+	switch n := e.(type) {
+	case *parser.BoolLiteral:
+		val := 0
+		if n.Value {
+			val = 1
+		}
+		if isXmm {
+			// XMM register: load a float constant 0.0 or 1.0
+			label := cg.newFloat(float64(val))
+			sec.WriteString(fmt.Sprintf("    movsd %s, [%s]\n", reg, label))
+		} else {
+			if val == 0 {
+				sec.WriteString(fmt.Sprintf("    xor %s, %s\n", reg, reg))
+			} else {
+				sec.WriteString(fmt.Sprintf("    mov %s, 1\n", reg))
+			}
+		}
+	case *parser.IntLiteral:
+		if isXmm {
+			label := cg.newFloat(float64(n.Value))
+			sec.WriteString(fmt.Sprintf("    movsd %s, [%s]\n", reg, label))
+		} else {
+			if n.Value == 0 {
+				sec.WriteString(fmt.Sprintf("    xor %s, %s\n", reg, reg))
+			} else {
+				sec.WriteString(fmt.Sprintf("    mov %s, %d\n", reg, n.Value))
+			}
+		}
+	case *parser.NumberLiteral:
+		if isXmm {
+			label := cg.newFloat(n.Value)
+			sec.WriteString(fmt.Sprintf("    movsd %s, [%s]\n", reg, label))
+		} else {
+			label := cg.newFloat(n.Value)
+			sec.WriteString(fmt.Sprintf("    movsd xmm0, [%s]\n", label))
+			sec.WriteString(fmt.Sprintf("    cvttsd2si %s, xmm0\n", reg))
+		}
+	case *parser.Identifier:
+		off, ok := cg.getVarOffset(n.Value)
+		if !ok {
+			return
+		}
+		ref := cg.varRef(n.Value, off)
+		if isXmm {
+			sec.WriteString(fmt.Sprintf("    movsd %s, %s\n", reg, ref))
+		} else {
+			sec.WriteString(fmt.Sprintf("    mov %s, %s\n", reg, ref))
+		}
+	default:
+		if isXmm {
+			cg.genExpression(e, sec)
+			if reg != "xmm0" {
+				sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", reg))
+			}
+		} else {
+			cg.genExpression(e, sec)
+			if reg != "rax" {
+				sec.WriteString(fmt.Sprintf("    mov %s, rax\n", reg))
+			}
+		}
+	}
+}
+
 func (cg *CppGenerator) genBinaryOp(n *parser.PostfixExpression, sec *strings.Builder) {
 	if n.Operator == "және" || n.Operator == "немесе" {
-		cg.genExpression(n.Left, sec)
-		sec.WriteString("    sub rsp, 8\n")
-		sec.WriteString("    mov [rsp], rax\n") // push left boolean (rax)
+		if cg.isSimpleExpression(n.Right) {
+			cg.genExpression(n.Left, sec)
+			sec.WriteString("    mov rcx, rax\n")
+			cg.genSimpleExpression(n.Right, "rax", sec)
+		} else {
+			cg.genExpression(n.Left, sec)
+			sec.WriteString("    sub rsp, 8\n")
+			sec.WriteString("    mov [rsp], rax\n") // push left boolean (rax)
 
-		cg.genExpression(n.Right, sec)
-		sec.WriteString("    mov rcx, [rsp]\n") // pop left into rcx
-		sec.WriteString("    add rsp, 8\n")
+			cg.genExpression(n.Right, sec)
+			sec.WriteString("    mov rcx, [rsp]\n") // pop left into rcx
+			sec.WriteString("    add rsp, 8\n")
+		}
 
 		if n.Operator == "және" {
 			sec.WriteString("    and rax, rcx\n")
@@ -1464,14 +2221,95 @@ func (cg *CppGenerator) genBinaryOp(n *parser.PostfixExpression, sec *strings.Bu
 		return
 	}
 
-	// Evaluate left, push to stack, evaluate right, then operate
-	cg.genExpression(n.Left, sec)
-	sec.WriteString("    sub rsp, 8\n")
-	sec.WriteString("    movsd [rsp], xmm0\n") // push left
+	leaf := cg.getLeafOperand(n.Right)
+	if leaf != "" {
+		cg.genExpression(n.Left, sec) // left value in xmm0
+		switch n.Operator {
+		case "қосу":
+			sec.WriteString(fmt.Sprintf("    addsd xmm0, %s\n", leaf))
+		case "алу":
+			sec.WriteString(fmt.Sprintf("    subsd xmm0, %s\n", leaf))
+		case "көбейту":
+			sec.WriteString(fmt.Sprintf("    mulsd xmm0, %s\n", leaf))
+		case "бөлу":
+			leftType := cg.tc.Check(n.Left, cg.env)
+			rightType := cg.tc.Check(n.Right, cg.env)
+			if leftType == typechecker.INT_TYPE && rightType == typechecker.INT_TYPE {
+				sec.WriteString("    cvttsd2si rax, xmm0\n")
+				if il, ok := n.Right.(*parser.IntLiteral); ok {
+					if il.Value == 0 {
+						sec.WriteString("    jmp _runtime_divide_by_zero_error\n")
+					} else {
+						sec.WriteString(fmt.Sprintf("    mov rcx, %d\n", il.Value))
+					}
+				} else {
+					sec.WriteString(fmt.Sprintf("    cvttsd2si rcx, %s\n", leaf))
+					sec.WriteString("    cmp rcx, 0\n")
+					sec.WriteString("    je _runtime_divide_by_zero_error\n")
+				}
+				sec.WriteString("    cqo\n")
+				sec.WriteString("    idiv rcx\n")
+				sec.WriteString("    cvtsi2sd xmm0, rax\n")
+			} else {
+				isZeroLiteral := false
+				if il, ok := n.Right.(*parser.IntLiteral); ok && il.Value == 0 {
+					isZeroLiteral = true
+				} else if fl, ok := n.Right.(*parser.NumberLiteral); ok && fl.Value == 0.0 {
+					isZeroLiteral = true
+				}
+				if isZeroLiteral {
+					sec.WriteString("    jmp _runtime_divide_by_zero_error\n")
+				} else if _, ok := n.Right.(*parser.IntLiteral); ok {
+					// safe literal, skip check
+					sec.WriteString(fmt.Sprintf("    divsd xmm0, %s\n", leaf))
+				} else if _, ok := n.Right.(*parser.NumberLiteral); ok {
+					// safe literal, skip check
+					sec.WriteString(fmt.Sprintf("    divsd xmm0, %s\n", leaf))
+				} else {
+					sec.WriteString(fmt.Sprintf("    movsd xmm2, %s\n", leaf))
+					sec.WriteString("    xorpd xmm3, xmm3\n")
+					sec.WriteString("    comisd xmm2, xmm3\n")
+					sec.WriteString("    je _runtime_divide_by_zero_error\n")
+					sec.WriteString(fmt.Sprintf("    divsd xmm0, %s\n", leaf))
+				}
+			}
+		case "үлкен", "кіші", "тең", "тең_емес", "үлкен_тең", "кіші_тең":
+			sec.WriteString("    xor rax, rax\n")
+			sec.WriteString(fmt.Sprintf("    comisd xmm0, %s\n", leaf))
+			switch n.Operator {
+			case "үлкен":
+				sec.WriteString("    seta al\n")
+			case "кіші":
+				sec.WriteString("    setb al\n")
+			case "тең":
+				sec.WriteString("    sete al\n")
+			case "тең_емес":
+				sec.WriteString("    setne al\n")
+			case "үлкен_тең":
+				sec.WriteString("    setae al\n")
+			case "кіші_тең":
+				sec.WriteString("    setbe al\n")
+			}
+			sec.WriteString("    cvtsi2sd xmm0, rax\n")
+		}
+		return
+	}
 
-	cg.genExpression(n.Right, sec)
-	sec.WriteString("    movsd xmm1, [rsp]\n") // pop left into xmm1
-	sec.WriteString("    add rsp, 8\n")
+	// Fallback to standard stack-based operations
+	if isLeafExpression(n.Right) {
+		cg.genExpression(n.Left, sec)
+		sec.WriteString("    movsd xmm1, xmm0\n") // move left to xmm1
+		cg.genExpression(n.Right, sec)          // evaluate right into xmm0
+	} else {
+		// Evaluate left, push to stack, evaluate right, then operate
+		cg.genExpression(n.Left, sec)
+		sec.WriteString("    sub rsp, 8\n")
+		sec.WriteString("    movsd [rsp], xmm0\n") // push left
+
+		cg.genExpression(n.Right, sec)
+		sec.WriteString("    movsd xmm1, [rsp]\n") // pop left into xmm1
+		sec.WriteString("    add rsp, 8\n")
+	}
 	// now: xmm1 = left, xmm0 = right
 
 	switch n.Operator {
@@ -1485,13 +2323,24 @@ func (cg *CppGenerator) genBinaryOp(n *parser.PostfixExpression, sec *strings.Bu
 		sec.WriteString("    mulsd xmm1, xmm0\n")
 		sec.WriteString("    movsd xmm0, xmm1\n")
 	case "бөлу":
-		sec.WriteString("    xorpd xmm2, xmm2\n")
-		sec.WriteString("    comisd xmm0, xmm2\n")
-		sec.WriteString("    je _runtime_divide_by_zero_error\n")
-		sec.WriteString("    divsd xmm1, xmm0\n")
-		sec.WriteString("    movsd xmm0, xmm1\n")
+		leftType := cg.tc.Check(n.Left, cg.env)
+		rightType := cg.tc.Check(n.Right, cg.env)
+		if leftType == typechecker.INT_TYPE && rightType == typechecker.INT_TYPE {
+			sec.WriteString("    cvttsd2si rax, xmm1\n")
+			sec.WriteString("    cvttsd2si rcx, xmm0\n")
+			sec.WriteString("    cmp rcx, 0\n")
+			sec.WriteString("    je _runtime_divide_by_zero_error\n")
+			sec.WriteString("    cqo\n")
+			sec.WriteString("    idiv rcx\n")
+			sec.WriteString("    cvtsi2sd xmm0, rax\n")
+		} else {
+			sec.WriteString("    xorpd xmm2, xmm2\n")
+			sec.WriteString("    comisd xmm0, xmm2\n")
+			sec.WriteString("    je _runtime_divide_by_zero_error\n")
+			sec.WriteString("    divsd xmm1, xmm0\n")
+			sec.WriteString("    movsd xmm0, xmm1\n")
+		}
 	case "үлкен", "кіші", "тең", "тең_емес", "үлкен_тең", "кіші_тең":
-		// Return bool result in rax and sync to xmm0
 		sec.WriteString("    xor rax, rax\n")
 		sec.WriteString("    comisd xmm1, xmm0\n")
 		switch n.Operator {
@@ -1567,9 +2416,43 @@ func (cg *CppGenerator) genCallExpr(n *parser.CallExpression, sec *strings.Build
 		// Convert rand int in rax to double float in xmm0
 		sec.WriteString("    cvtsi2sd xmm0, rax\n")
 		return
+
+	case "уақыт":
+		sec.WriteString("    ; уақыт\n")
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call _runtime_clock\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    call _runtime_clock\n")
+		}
+		// _runtime_clock returns double in xmm0
+		return
+
+	case "ағын_күту":
+		sec.WriteString("    ; ағын_күту\n")
+		cg.genExpression(n.Arguments[0], sec) // xmm0 = float handle
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    cvttsd2si rcx, xmm0\n")
+			sec.WriteString("    sub rsp, 32\n")
+			sec.WriteString("    call builtin_thread_join\n")
+			sec.WriteString("    add rsp, 32\n")
+		} else {
+			sec.WriteString("    cvttsd2si rdi, xmm0\n")
+			sec.WriteString("    call builtin_thread_join\n")
+		}
+		sec.WriteString("    cvtsi2sd xmm0, rax\n")
+		return
 	}
 
 	// Check if it is a struct constructor
+	// Interface constructor/cast: ДыбысШығарғыш(ит) → allocate box {struct_ptr, vtable_ptr}
+	if _, ok := cg.interfaces[n.Function]; ok {
+		cg.genExpressionCoerced(n.Arguments[0], typechecker.Type("ИНТЕРФЕЙС_"+n.Function), sec)
+		// Result: rax = box pointer (16-byte {struct_ptr, vtable_ptr})
+		return
+	}
+
 	if structDef, ok := cg.structs[n.Function]; ok {
 		numFields := len(structDef.Fields)
 		size := numFields * 8
@@ -1590,11 +2473,12 @@ func (cg *CppGenerator) genCallExpr(n *parser.CallExpression, sec *strings.Build
 		sec.WriteString("    push rax\n")
 		// Evaluate arguments and assign to fields
 		for i, arg := range n.Arguments {
-			cg.genExpression(arg, sec)
+			expectedType := cg.tc.FieldTypeToType(structDef.Types[i])
+			cg.genExpressionCoerced(arg, expectedType, sec)
 			sec.WriteString("    mov r12, [rsp]\n") // peek struct pointer
 			fieldType := structDef.Types[i]
 			fieldOffset := i * 8
-			if fieldType == "МӘТІН" || fieldType == "ТІЗІМ" || (fieldType != "САН" && fieldType != "БҮТІН" && fieldType != "АҚИҚАТ" && fieldType != "БАЙТ") {
+			if fieldType == "МӘТІН" || fieldType == "ТІЗІМ" || (fieldType != "САН" && fieldType != "БҮТІН" && fieldType != "АҚИҚАТ" && fieldType != "БАЙТ") || strings.HasPrefix(string(expectedType), "ИНТЕРФЕЙС_") {
 				sec.WriteString(fmt.Sprintf("    mov [r12 + %d], rax\n", fieldOffset))
 			} else {
 				sec.WriteString(fmt.Sprintf("    movsd [r12 + %d], xmm0\n", fieldOffset))
@@ -1604,9 +2488,109 @@ func (cg *CppGenerator) genCallExpr(n *parser.CallExpression, sec *strings.Build
 		return
 	}
 
+	parts := strings.Split(n.Function, ".")
+	isInterfaceCall := len(parts) == 2 && cg.interfaces[parts[0]] != nil
+
+	if isInterfaceCall {
+		interfaceName := parts[0]
+		methodName := parts[1]
+		interf := cg.interfaces[interfaceName]
+		methodIdx := -1
+		for idx, m := range interf.Methods {
+			if m.Name == methodName {
+				methodIdx = idx
+				break
+			}
+		}
+		if methodIdx == -1 {
+			sec.WriteString(fmt.Sprintf("    ; ERROR: method %s not found in interface %s\n", methodName, interfaceName))
+			return
+		}
+
+		sec.WriteString(fmt.Sprintf("    ; интерфейстік шақыру %s\n", n.Function))
+
+		nArgs := len(n.Arguments)
+		argIsStr := make([]bool, nArgs)
+		sig, _ := cg.funcs[n.Function]
+
+		// Step 1: Evaluate arguments in order and push to stack
+		for i, arg := range n.Arguments {
+			var expectedType typechecker.Type = typechecker.UNKNOWN
+			if sig != nil && i < len(sig.ParamTypes) {
+				expectedType = sig.ParamTypes[i]
+			}
+			cg.genExpressionCoerced(arg, expectedType, sec)
+			argIsStr[i] = cg.isStringExpr(arg) || strings.HasPrefix(string(expectedType), "ИНТЕРФЕЙС_")
+			if argIsStr[i] {
+				sec.WriteString("    sub rsp, 8\n")
+				sec.WriteString("    mov [rsp], rax\n")
+			} else {
+				sec.WriteString("    sub rsp, 8\n")
+				sec.WriteString("    movsd [rsp], xmm0\n")
+			}
+		}
+
+		// Step 2: Pop arguments in reverse order into ABI registers
+		for i := nArgs - 1; i >= 0; i-- {
+			if argIsStr[i] {
+				sec.WriteString("    pop rax\n")
+				if cg.platform == PlatformLinux {
+					if i < len(linuxArgRegs) {
+						sec.WriteString(fmt.Sprintf("    mov %s, rax\n", linuxArgRegs[i]))
+					}
+				} else {
+					if i < len(winArgRegs) {
+						sec.WriteString(fmt.Sprintf("    mov %s, rax\n", winArgRegs[i]))
+					}
+				}
+			} else {
+				sec.WriteString("    movsd xmm0, [rsp]\n")
+				sec.WriteString("    add rsp, 8\n")
+				if cg.platform == PlatformLinux {
+					if i < len(linuxFloatRegs) {
+						sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", linuxFloatRegs[i]))
+					}
+				} else {
+					if i < len(winFloatRegs) {
+						sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", winFloatRegs[i]))
+						sec.WriteString(fmt.Sprintf("    movq %s, xmm0\n", winArgRegs[i]))
+					}
+				}
+			}
+		}
+
+		// Step 3: Extract struct ptr and vtable from the first argument (interface box)
+		if cg.platform == PlatformLinux {
+			sec.WriteString("    mov r12, rdi           ; r12 = box ptr\n")
+			sec.WriteString("    mov r13, [r12 + 8]     ; r13 = vtable ptr\n")
+			sec.WriteString("    mov r12, [r12]         ; r12 = struct ptr\n")
+			sec.WriteString("    mov rdi, r12           ; first arg = struct ptr\n")
+		} else {
+			sec.WriteString("    mov r12, rcx           ; r12 = box ptr\n")
+			sec.WriteString("    mov r13, [r12 + 8]     ; r13 = vtable ptr\n")
+			sec.WriteString("    mov r12, [r12]         ; r12 = struct ptr\n")
+			sec.WriteString("    mov rcx, r12           ; first arg = struct ptr\n")
+		}
+
+		// Step 4: Call method dynamically
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    sub rsp, 32\n")
+		}
+		sec.WriteString(fmt.Sprintf("    mov rax, [r13 + %d]    ; load method address\n", methodIdx*8))
+		sec.WriteString("    call rax\n")
+		if cg.platform == PlatformWindows {
+			sec.WriteString("    add rsp, 32\n")
+		}
+		return
+	}
+
 	sec.WriteString(fmt.Sprintf("    ; шақыру %s\n", n.Function))
 
+	// Resolve Kazakh name → C runtime name if it's a builtin
 	funcLabel := strings.ReplaceAll(n.Function, ".", "_")
+	if cName, ok := builtinFuncMap[n.Function]; ok {
+		funcLabel = cName
+	}
 	nArgs := len(n.Arguments)
 	if nArgs == 0 {
 		if cg.platform == PlatformWindows {
@@ -1619,49 +2603,126 @@ func (cg *CppGenerator) genCallExpr(n *parser.CallExpression, sec *strings.Build
 		return
 	}
 
-	// Step 1: Evaluate all arguments in order and push each onto the stack.
-	// We track which args are string/pointer so we know which register lane to use.
+	// Step 1: Populate argIsStr
 	argIsStr := make([]bool, nArgs)
+	sig, _ := cg.funcs[n.Function]
 	for i, arg := range n.Arguments {
-		cg.genExpression(arg, sec)
-		argIsStr[i] = cg.isStringExpr(arg)
-		if argIsStr[i] {
-			// Pointer is in rax — push rax
-			sec.WriteString("    sub rsp, 8\n")
-			sec.WriteString("    mov [rsp], rax\n")
-		} else {
-			// Float is in xmm0 — push as qword
-			sec.WriteString("    sub rsp, 8\n")
-			sec.WriteString("    movsd [rsp], xmm0\n")
+		var expectedType typechecker.Type = typechecker.UNKNOWN
+		if sig != nil && i < len(sig.ParamTypes) {
+			expectedType = sig.ParamTypes[i]
 		}
+		argIsStr[i] = cg.isStringExpr(arg) || strings.HasPrefix(string(expectedType), "ИНТЕРФЕЙС_")
 	}
 
-	// Step 2: Pop arguments in reverse order into the correct ABI registers.
-	// Arguments were pushed left-to-right, so the stack is [ arg0, arg1, ..., argN-1 ] (argN-1 at top).
-	for i := nArgs - 1; i >= 0; i-- {
-		if argIsStr[i] {
-			sec.WriteString("    pop rax\n") // pointer
+	maxRegArgs := 6
+	if cg.platform == PlatformWindows {
+		maxRegArgs = 4
+	}
+
+	complexCount := 0
+	complexIdx := -1
+	for i, arg := range n.Arguments {
+		if !cg.isSimpleExpression(arg) {
+			complexCount++
+			complexIdx = i
+		}
+	}
+	isStackless := nArgs <= maxRegArgs && complexCount <= 1
+
+	if isStackless {
+		getTargetReg := func(i int, isStr bool) (string, string) {
 			if cg.platform == PlatformLinux {
-				if i < len(linuxArgRegs) {
-					sec.WriteString(fmt.Sprintf("    mov %s, rax\n", linuxArgRegs[i]))
+				if isStr {
+					return linuxArgRegs[i], ""
+				} else {
+					return linuxFloatRegs[i], ""
 				}
 			} else {
-				if i < len(winArgRegs) {
-					sec.WriteString(fmt.Sprintf("    mov %s, rax\n", winArgRegs[i]))
+				if isStr {
+					return winArgRegs[i], ""
+				} else {
+					return winFloatRegs[i], winArgRegs[i]
 				}
 			}
-		} else {
-			sec.WriteString("    movsd xmm0, [rsp]\n")
-			sec.WriteString("    add rsp, 8\n")
-			if cg.platform == PlatformLinux {
-				if i < len(linuxFloatRegs) {
-					sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", linuxFloatRegs[i]))
+		}
+
+		// Evaluate complex argument first if there is one
+		if complexIdx != -1 {
+			var expectedType typechecker.Type = typechecker.UNKNOWN
+			if sig != nil && complexIdx < len(sig.ParamTypes) {
+				expectedType = sig.ParamTypes[complexIdx]
+			}
+			cg.genExpressionCoerced(n.Arguments[complexIdx], expectedType, sec)
+			reg1, reg2 := getTargetReg(complexIdx, argIsStr[complexIdx])
+			if argIsStr[complexIdx] {
+				if reg1 != "rax" {
+					sec.WriteString(fmt.Sprintf("    mov %s, rax\n", reg1))
 				}
 			} else {
-				if i < len(winFloatRegs) {
-					// Windows x64: float arg must be in BOTH the XMM reg AND the corresponding int reg
-					sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", winFloatRegs[i]))
-					sec.WriteString(fmt.Sprintf("    movq %s, xmm0\n", winArgRegs[i]))
+				if reg1 != "xmm0" {
+					sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", reg1))
+				}
+				if reg2 != "" {
+					sec.WriteString(fmt.Sprintf("    movq %s, xmm0\n", reg2))
+				}
+			}
+		}
+
+		// Evaluate simple arguments in reverse order (excluding complexIdx)
+		for i := nArgs - 1; i >= 0; i-- {
+			if i == complexIdx {
+				continue
+			}
+			reg1, reg2 := getTargetReg(i, argIsStr[i])
+			if argIsStr[i] {
+				cg.genSimpleExpression(n.Arguments[i], reg1, sec)
+			} else {
+				cg.genSimpleExpression(n.Arguments[i], reg1, sec)
+				if reg2 != "" {
+					sec.WriteString(fmt.Sprintf("    movq %s, %s\n", reg2, reg1))
+				}
+			}
+		}
+	} else {
+		// Fallback to stack-based parameter evaluation
+		for i, arg := range n.Arguments {
+			var expectedType typechecker.Type = typechecker.UNKNOWN
+			if sig != nil && i < len(sig.ParamTypes) {
+				expectedType = sig.ParamTypes[i]
+			}
+			cg.genExpressionCoerced(arg, expectedType, sec)
+			if argIsStr[i] {
+				sec.WriteString("    sub rsp, 8\n")
+				sec.WriteString("    mov [rsp], rax\n")
+			} else {
+				sec.WriteString("    sub rsp, 8\n")
+				sec.WriteString("    movsd [rsp], xmm0\n")
+			}
+		}
+		for i := nArgs - 1; i >= 0; i-- {
+			if argIsStr[i] {
+				sec.WriteString("    pop rax\n")
+				if cg.platform == PlatformLinux {
+					if i < len(linuxArgRegs) {
+						sec.WriteString(fmt.Sprintf("    mov %s, rax\n", linuxArgRegs[i]))
+					}
+				} else {
+					if i < len(winArgRegs) {
+						sec.WriteString(fmt.Sprintf("    mov %s, rax\n", winArgRegs[i]))
+					}
+				}
+			} else {
+				sec.WriteString("    movsd xmm0, [rsp]\n")
+				sec.WriteString("    add rsp, 8\n")
+				if cg.platform == PlatformLinux {
+					if i < len(linuxFloatRegs) {
+						sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", linuxFloatRegs[i]))
+					}
+				} else {
+					if i < len(winFloatRegs) {
+						sec.WriteString(fmt.Sprintf("    movsd %s, xmm0\n", winFloatRegs[i]))
+						sec.WriteString(fmt.Sprintf("    movq %s, xmm0\n", winArgRegs[i]))
+					}
 				}
 			}
 		}

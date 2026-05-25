@@ -21,13 +21,13 @@ func main() {
 		compilerBinary = ".\\butaq.exe"
 	}
 
-	buildCmd := exec.Command("go", "build", "-o", compilerBinary, "main.go")
+	buildCmd := exec.Command("go", "build", "-o", compilerBinary, ".")
 	buildOut, err := buildCmd.CombinedOutput()
 	if err != nil {
 		fmt.Printf("❌ Компиляторды жинақтау қатесі:\n%s\n", string(buildOut))
 		os.Exit(1)
 	}
-	fmt.Println("✅ Компилятор сәтті жинақталды!\n")
+	fmt.Println("✅ Компилятор сәтті жинақталды!")
 
 	// 2. Scan examples
 	files, err := os.ReadDir("examples")
@@ -71,6 +71,7 @@ func main() {
 		if runtime.GOOS == "windows" {
 			runCmd = exec.Command(".\\" + binaryName)
 		}
+		runCmd.Stdin = strings.NewReader("Butaq\n")
 
 		runOut, err := runCmd.CombinedOutput()
 		if err != nil {

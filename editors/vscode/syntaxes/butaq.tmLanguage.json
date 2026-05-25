@@ -18,7 +18,13 @@
       "include": "#types"
     },
     {
+      "include": "#constants"
+    },
+    {
       "include": "#builtins"
+    },
+    {
+      "include": "#operators"
     },
     {
       "include": "#identifiers"
@@ -52,11 +58,11 @@
       "patterns": [
         {
           "name": "constant.numeric.float.butaq",
-          "match": "\\b\\d+\\.\\d+\\b"
+          "match": "(?<![\\p{L}\\d_])\\d+\\.\\d+(?![\\p{L}\\d_])"
         },
         {
           "name": "constant.numeric.integer.butaq",
-          "match": "\\b\\d+\\b"
+          "match": "(?<![\\p{L}\\d_])\\d+(?![\\p{L}\\d_])"
         }
       ]
     },
@@ -64,19 +70,19 @@
       "patterns": [
         {
           "name": "keyword.control.butaq",
-          "match": "\\b(егер|әйтпесе|әзірше|үзу|жалғастыру|қайтару|енгізу)\\b"
-        },
-        {
-          "name": "keyword.operator.word.butaq",
-          "match": "\\b(болсын|алу|қосу|азайту|жасу|жасау|бос|шақыру|тізім_алу|тізім_ұзындығы|бойынша|дейін)\\b"
+          "match": "(?<![\\p{L}\\d_])(егер|әйтпесе|әзірше|үзу|жалғастыру|қайтару|енгізу)(?![\\p{L}\\d_])"
         },
         {
           "name": "storage.type.function.butaq",
-          "match": "\\b(функция)\\b"
+          "match": "(?<![\\p{L}\\d_])(функция)(?![\\p{L}\\d_])"
         },
         {
           "name": "storage.type.struct.butaq",
-          "match": "\\b(құрылым)\\b"
+          "match": "(?<![\\p{L}\\d_])(құрылым)(?![\\p{L}\\d_])"
+        },
+        {
+          "name": "keyword.declaration.butaq",
+          "match": "(?<![\\p{L}\\d_])(болсын|жасау|әлсіз|бос|ағын)(?![\\p{L}\\d_])"
         }
       ]
     },
@@ -84,7 +90,15 @@
       "patterns": [
         {
           "name": "support.type.primitive.butaq",
-          "match": "\\b(САН|МӘТІН|БҮТІН|ЛОГИКА)\\b"
+          "match": "(?<![\\p{L}\\d_])(БҮТІН|САН|МӘТІН|АҚИҚАТ|БАЙТ|тізім)(?![\\p{L}\\d_])"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.butaq",
+          "match": "(?<![\\p{L}\\d_])(ақиқат|жалған)(?![\\p{L}\\d_])"
         }
       ]
     },
@@ -92,7 +106,15 @@
       "patterns": [
         {
           "name": "support.function.builtin.butaq",
-          "match": "\\b(мәтін_ұзындығы|таңба|бүтін|кездейсоқ|жазу)\\b"
+          "match": "(?<![\\p{L}\\d_])(жазу|файл_оқу|файл_жазу|кіру|таңба_коды|санды_мәтін|мәтін_тең|ұзындық_жол|біріктіру|символ|тізім_қой|тізім_алу|ұзындық|шақыру)(?![\\p{L}\\d_])"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.butaq",
+          "match": "(?<![\\p{L}\\d_])(қосу|алу|көбейту|бөлу|үлкен|кіші|тең|тең_емес|үлкен_тең|кіші_тең|және|немесе|емес|жылжыту_сол|жылжыту_оң)(?![\\p{L}\\d_])"
         }
       ]
     },
@@ -100,10 +122,10 @@
       "patterns": [
         {
           "name": "variable.other.butaq",
-          "match": "\\b[a-zA-Zа-яА-ЯәғқңөұүһіӘҒҚҢӨҰҮҺІ_][a-zA-Zа-яА-ЯәғқңөұүһіӘҒҚҢӨҰҮҺІ0-9_]*\\b"
+          "match": "[\\p{L}_][\\p{L}\\d_]*"
         }
       ]
     }
-  ],
+  },
   "scopeName": "source.butaq"
 }

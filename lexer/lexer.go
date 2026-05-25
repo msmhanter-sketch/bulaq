@@ -45,6 +45,8 @@ const (
 	AND // және
 	OR  // немесе
 	NOT // емес
+	LSHIFT // жылжыту_сол
+	RSHIFT // жылжыту_оң
 
 	// Blocks
 	LBRACE // {
@@ -82,6 +84,8 @@ const (
 	// Structs
 	STRUCT // құрылым
 	NEW    // жасау
+	WEAK   // әлсіз
+	THREAD // ағын
 
 	// String / char ops
 	CHAR_AT    // символ
@@ -91,12 +95,23 @@ const (
 	TO_STR     // санды_мәтін (number to string)
 	CHAR_CODE  // таңба_коды (byte value of first char)
 
+	// New string ops (handled as plain identifiers/CallExpressions — no special tokens needed)
+	// Extended math (handled as plain identifiers/CallExpressions — no special tokens needed)
+	// Map / Dictionary (handled as plain identifiers/CallExpressions — no special tokens needed)
+
 	// File I/O
 	FILE_READ  // файл_оқу
 	FILE_WRITE // файл_жазу
 
 	// User Input
 	INPUT // кіру
+
+	// Error Handling
+	TRY_ERROR     // қатемен
+	ERROR_LITERAL // қате
+
+	// Interfaces
+	INTERFACE // интерфейс
 )
 
 type Token struct {
@@ -134,6 +149,8 @@ var keywords = map[string]TokenType{
 	"және":   AND,
 	"немесе": OR,
 	"емес":   NOT,
+	"жылжыту_сол": LSHIFT,
+	"жылжыту_оң":  RSHIFT,
 
 	// Functions
 	"функция": FUNC,
@@ -161,6 +178,8 @@ var keywords = map[string]TokenType{
 	// Structs
 	"құрылым": STRUCT,
 	"жасау":   NEW,
+	"әлсіз":   WEAK,
+	"ағын":    THREAD,
 
 	// String / char ops
 	"символ":      CHAR_AT,
@@ -176,6 +195,13 @@ var keywords = map[string]TokenType{
 
 	// User Input
 	"кіру": INPUT,
+
+	// Error Handling
+	"қатемен":    TRY_ERROR,
+	"қате":       ERROR_LITERAL,
+
+	// Interfaces
+	"интерфейс": INTERFACE,
 
 	// Imports
 	"енгізу": IMPORT,

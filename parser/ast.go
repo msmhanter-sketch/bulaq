@@ -1,9 +1,28 @@
 package parser
 
 import (
+	"butaq/lexer"
 	"bytes"
 	"fmt"
 )
+
+// ---------------------------------------------------------------------------
+// Position tracking
+// ---------------------------------------------------------------------------
+
+type Pos struct {
+	Line int
+	Col  int
+}
+
+func (p *Pos) Position() (int, int) {
+	return p.Line, p.Col
+}
+
+func (p *Pos) SetPosition(line, col int) {
+	p.Line = line
+	p.Col = col
+}
 
 // ---------------------------------------------------------------------------
 // Node interfaces
@@ -12,6 +31,8 @@ import (
 type Node interface {
 	TokenLiteral() string
 	String() string
+	Position() (int, int)
+	SetPosition(line, col int)
 }
 
 type Statement interface {
@@ -29,6 +50,7 @@ type Expression interface {
 // ---------------------------------------------------------------------------
 
 type Program struct {
+	Pos
 	Statements []Statement
 }
 
@@ -48,6 +70,7 @@ func (p *Program) String() string {
 }
 
 type BlockStatement struct {
+	Pos
 	Statements []Statement
 }
 
@@ -65,31 +88,46 @@ func (b *BlockStatement) String() string {
 // Literals
 // ---------------------------------------------------------------------------
 
-type Identifier struct{ Value string }
+type Identifier struct {
+	Pos
+	Value string
+}
 
 func (i *Identifier) expressionNode()      {}
 func (i *Identifier) TokenLiteral() string { return i.Value }
 func (i *Identifier) String() string       { return i.Value }
 
-type NumberLiteral struct{ Value float64 }
+type NumberLiteral struct {
+	Pos
+	Value float64
+}
 
 func (nl *NumberLiteral) expressionNode()      {}
 func (nl *NumberLiteral) TokenLiteral() string { return "number" }
 func (nl *NumberLiteral) String() string       { return fmt.Sprintf("%v", nl.Value) }
 
-type IntLiteral struct{ Value int64 }
+type IntLiteral struct {
+	Pos
+	Value int64
+}
 
 func (il *IntLiteral) expressionNode()      {}
 func (il *IntLiteral) TokenLiteral() string { return "int" }
 func (il *IntLiteral) String() string       { return fmt.Sprintf("%d", il.Value) }
 
-type StringLiteral struct{ Value string }
+type StringLiteral struct {
+	Pos
+	Value string
+}
 
 func (sl *StringLiteral) expressionNode()      {}
 func (sl *StringLiteral) TokenLiteral() string { return sl.Value }
 func (sl *StringLiteral) String() string       { return `"` + sl.Value + `"` }
 
-type BoolLiteral struct{ Value bool }
+type BoolLiteral struct {
+	Pos
+	Value bool
+}
 
 func (bl *BoolLiteral) expressionNode()      {}
 func (bl *BoolLiteral) TokenLiteral() string { return fmt.Sprintf("%v", bl.Value) }
@@ -101,6 +139,7 @@ func (bl *BoolLiteral) String() string       { return fmt.Sprintf("%v", bl.Value
 
 // Postfix / infix binary operation: <left> <right> <operator>
 type PostfixExpression struct {
+	Pos
 	Left     Expression
 	Right    Expression
 	Operator string
@@ -114,6 +153,7 @@ func (pe *PostfixExpression) String() string {
 
 // Unary NOT: <expr> емес
 type UnaryExpression struct {
+	Pos
 	Operator string
 	Right    Expression
 }
@@ -124,6 +164,7 @@ func (ue *UnaryExpression) String() string       { return "(" + ue.Operator + " 
 
 // Function call: funcName(arg1, arg2) шақыру
 type CallExpression struct {
+	Pos
 	Function  string
 	Arguments []Expression
 }
@@ -145,17 +186,34 @@ func (ce *CallExpression) String() string {
 
 // Struct definition: құрылым Адам { аты жасы }
 type StructStatement struct {
+	Pos
 	Name   string
 	Fields []string
 	Types  []string
+	IsWeak []bool
 }
 
 func (ss *StructStatement) statementNode()       {}
 func (ss *StructStatement) TokenLiteral() string { return "құрылым" }
 func (ss *StructStatement) String() string       { return "struct " + ss.Name }
 
+// Thread Statement: ағын { ... } немесе ағын функция()
+type ThreadStatement struct {
+	Pos
+	Token lexer.Token // THREAD
+	Body  Statement   // BlockStatement or ExpressionStatement containing CallExpression
+}
+
+func (ts *ThreadStatement) statementNode()       {}
+func (ts *ThreadStatement) expressionNode()      {}
+func (ts *ThreadStatement) TokenLiteral() string { return ts.Token.Literal }
+func (ts *ThreadStatement) String() string {
+	return "thread " + ts.Body.String()
+}
+
 // Struct instantiation: Адам жасау
 type StructCreateExpression struct {
+	Pos
 	StructName string
 }
 
@@ -165,6 +223,7 @@ func (sc *StructCreateExpression) String() string       { return "new " + sc.Str
 
 // Struct field access: adam.аты
 type StructFieldAccessExpression struct {
+	Pos
 	StructName string
 	Field      string
 	Target     Expression
@@ -176,6 +235,7 @@ func (sa *StructFieldAccessExpression) String() string       { return sa.StructN
 
 // Array literal: тізім [1 2 3] болсын
 type ArrayLiteral struct {
+	Pos
 	Elements []Expression
 }
 
@@ -196,6 +256,7 @@ func (al *ArrayLiteral) String() string {
 
 // Index get: arr 0 алу
 type IndexExpression struct {
+	Pos
 	Left  Expression
 	Index Expression
 }
@@ -208,6 +269,7 @@ func (ie *IndexExpression) String() string {
 
 // Array length: arr ұзындық
 type LengthExpression struct {
+	Pos
 	Value Expression
 }
 
@@ -217,6 +279,7 @@ func (le *LengthExpression) String() string       { return "len(" + le.Value.Str
 
 // Char at: str idx символ
 type CharAtExpression struct {
+	Pos
 	Str   Expression
 	Index Expression
 }
@@ -229,6 +292,7 @@ func (ca *CharAtExpression) String() string {
 
 // String concat: str1 str2 біріктіру
 type StrConcatExpression struct {
+	Pos
 	Left  Expression
 	Right Expression
 }
@@ -239,6 +303,7 @@ func (sc *StrConcatExpression) String() string       { return sc.Left.String() +
 
 // String length: str ұзындық_жол
 type StrLenExpression struct {
+	Pos
 	Value Expression
 }
 
@@ -248,6 +313,7 @@ func (sl *StrLenExpression) String() string       { return "strlen(" + sl.Value.
 
 // String equals: str1 str2 мәтін_тең
 type StrEqExpression struct {
+	Pos
 	Left  Expression
 	Right Expression
 }
@@ -258,6 +324,7 @@ func (se *StrEqExpression) String() string       { return se.Left.String() + " =
 
 // Number to string: num санды_мәтін
 type ToStrExpression struct {
+	Pos
 	Value Expression
 }
 
@@ -267,6 +334,7 @@ func (ts *ToStrExpression) String() string       { return "tostr(" + ts.Value.St
 
 // Char code: str таңба_коды → byte value of first byte as float
 type CharCodeExpression struct {
+	Pos
 	Value Expression
 }
 
@@ -276,6 +344,7 @@ func (cc *CharCodeExpression) String() string       { return "charcode(" + cc.Va
 
 // File read: "path" файл_оқу  → returns string with file contents
 type FileReadExpression struct {
+	Pos
 	Path Expression
 }
 
@@ -284,7 +353,9 @@ func (fr *FileReadExpression) TokenLiteral() string { return "файл_оқу" }
 func (fr *FileReadExpression) String() string       { return "file_read(" + fr.Path.String() + ")" }
 
 // Input: кіру  → reads one line from stdin, returns string pointer
-type InputExpression struct{}
+type InputExpression struct {
+	Pos
+}
 
 func (ie *InputExpression) expressionNode()      {}
 func (ie *InputExpression) TokenLiteral() string { return "кіру" }
@@ -292,6 +363,7 @@ func (ie *InputExpression) String() string       { return "кіру" }
 
 // File write: "path" content файл_жазу  → statement (writes content to file)
 type FileWriteStatement struct {
+	Pos
 	Path    Expression
 	Content Expression
 }
@@ -308,6 +380,7 @@ func (fw *FileWriteStatement) String() string {
 
 // x 10 болсын
 type VarAssignStatement struct {
+	Pos
 	Name  *Identifier
 	Value Expression
 }
@@ -320,6 +393,7 @@ func (vs *VarAssignStatement) String() string {
 
 // adam.аты "Али" болсын
 type StructFieldAssignStatement struct {
+	Pos
 	StructName string
 	Field      string
 	Value      Expression
@@ -334,6 +408,7 @@ func (sf *StructFieldAssignStatement) String() string {
 
 // arr 0 10 тізім_қой  (array[index] = value)
 type IndexAssignStatement struct {
+	Pos
 	Array *Identifier
 	Index Expression
 	Value Expression
@@ -347,6 +422,7 @@ func (ia *IndexAssignStatement) String() string {
 
 // arr бос  (free(arr))
 type FreeStatement struct {
+	Pos
 	Value Expression
 }
 
@@ -356,6 +432,7 @@ func (fs *FreeStatement) String() string       { return "free(" + fs.Value.Strin
 
 // "Сәлем" жазу
 type PrintStatement struct {
+	Pos
 	Value Expression
 }
 
@@ -365,6 +442,7 @@ func (ps *PrintStatement) String() string       { return ps.Value.String() + " �
 
 // x 5 үлкен егер { ... } әйтпесе { ... }
 type IfStatement struct {
+	Pos
 	Condition   Expression
 	Consequence *BlockStatement
 	Alternative *BlockStatement
@@ -372,6 +450,7 @@ type IfStatement struct {
 
 func (is *IfStatement) statementNode()       {}
 func (is *IfStatement) TokenLiteral() string { return "егер" }
+
 func (is *IfStatement) String() string {
 	out := is.Condition.String() + " егер { " + is.Consequence.String() + " }"
 	if is.Alternative != nil {
@@ -382,6 +461,7 @@ func (is *IfStatement) String() string {
 
 // z 5 кіші әзірше { ... }
 type WhileStatement struct {
+	Pos
 	Condition Expression
 	Body      *BlockStatement
 }
@@ -394,6 +474,7 @@ func (ws *WhileStatement) String() string {
 
 // функция атауы(x, y) { ... }
 type FunctionStatement struct {
+	Pos
 	Name       string
 	Parameters []string
 	Body       *BlockStatement
@@ -407,6 +488,7 @@ func (fs *FunctionStatement) String() string {
 
 // қайтару <expr>
 type ReturnStatement struct {
+	Pos
 	Value Expression
 }
 
@@ -416,6 +498,7 @@ func (rs *ReturnStatement) String() string       { return "қайтару " + rs
 
 // Standalone call statement: funcName(args) шақыру
 type CallStatement struct {
+	Pos
 	Call *CallExpression
 }
 
@@ -425,6 +508,7 @@ func (cs *CallStatement) String() string       { return cs.Call.String() + " ш�
 
 // General expression statement
 type ExpressionStatement struct {
+	Pos
 	Expression Expression
 }
 
@@ -438,14 +522,18 @@ func (es *ExpressionStatement) String() string {
 }
 
 // Break statement: үзу
-type BreakStatement struct{}
+type BreakStatement struct {
+	Pos
+}
 
 func (bs *BreakStatement) statementNode()       {}
 func (bs *BreakStatement) TokenLiteral() string { return "үзу" }
 func (bs *BreakStatement) String() string       { return "үзу" }
 
 // Continue statement: жалғастыру
-type ContinueStatement struct{}
+type ContinueStatement struct {
+	Pos
+}
 
 func (cs *ContinueStatement) statementNode()       {}
 func (cs *ContinueStatement) TokenLiteral() string { return "жалғастыру" }
@@ -453,9 +541,52 @@ func (cs *ContinueStatement) String() string       { return "жалғастыр�
 
 // Import statement: "path" енгізу
 type ImportStatement struct {
+	Pos
 	Path string
 }
 
 func (is *ImportStatement) statementNode()       {}
 func (is *ImportStatement) TokenLiteral() string { return "енгізу" }
 func (is *ImportStatement) String() string       { return "\"" + is.Path + "\" енгізу" }
+
+// қате "хабарлама"
+type ErrorLiteral struct {
+	Pos
+	Token lexer.Token
+	Message Expression // сообщение об ошибке
+}
+
+func (el *ErrorLiteral) expressionNode()      {}
+func (el *ErrorLiteral) TokenLiteral() string { return el.Token.Literal }
+func (el *ErrorLiteral) String() string       { return "қате " + el.Message.String() }
+
+// <өрнек> қатемен <айнымалы> { <блок> }
+type TryErrorExpression struct {
+	Pos
+	Token   lexer.Token // токен "қатемен"
+	Left    Expression  // выражение, возвращающее Result
+	VarName string      // имя переменной для сообщения об ошибке
+	Block   *BlockStatement
+}
+
+func (te *TryErrorExpression) expressionNode()      {}
+func (te *TryErrorExpression) TokenLiteral() string { return te.Token.Literal }
+func (te *TryErrorExpression) String() string {
+	return te.Left.String() + " қатемен " + te.VarName + " " + te.Block.String()
+}
+
+type MethodSignature struct {
+	Name       string
+	Parameters []string
+	ReturnType string
+}
+
+type InterfaceStatement struct {
+	Pos
+	Name    string
+	Methods []MethodSignature
+}
+
+func (is *InterfaceStatement) statementNode()       {}
+func (is *InterfaceStatement) TokenLiteral() string { return "интерфейс" }
+func (is *InterfaceStatement) String() string       { return "interface " + is.Name }
