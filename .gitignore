@@ -19,3 +19,7 @@ Thumbs.db
 
 # Go build cache
 math
+
+# Benchmarks
+benchmarks/
+BENCHMARK_RESULTS.html
