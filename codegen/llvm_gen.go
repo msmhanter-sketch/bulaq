@@ -225,21 +225,7 @@ func (lg *LlvmGenerator) Generate(program *parser.Program) string {
 	// 2. Generate Struct Destructors
 	lg.genStructDestructors()
 
-	// 3. Collect and pre-declare all user-defined functions
-	for _, stmt := range program.Statements {
-		if fn, ok := stmt.(*parser.FunctionStatement); ok {
-			sig := lg.funcs[fn.Name]
-			retType := "double"
-			if sig != nil {
-				retType = lg.llvmType(sig.ReturnType)
-			}
-			var params []string
-			for _, pT := range sig.ParamTypes {
-				params = append(params, lg.llvmType(pT))
-			}
-			lg.prototypes.WriteString(fmt.Sprintf("declare %s @%s(%s)\n", retType, fn.Name, strings.Join(params, ", ")))
-		}
-	}
+	// 3. (Skipped user function declarations as LLVM defines them directly in this module)
 
 	// 4. Generate Main Function Signature
 	lg.mainFunc.WriteString("\ndefine i32 @main() {\n")
